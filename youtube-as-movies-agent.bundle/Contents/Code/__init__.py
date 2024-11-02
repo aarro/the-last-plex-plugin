@@ -18,7 +18,7 @@ def log_internal(msg):
     Log(msg)  # type: ignore
 
 
-class YoutubeDLMovieAgent(Agent.Movies):  # type: ignore
+class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
     name, primary_provider, fallback_agent, contributes_to, languages, accepts_from = (
         "aarros-yt-dlp",
         True,
@@ -44,7 +44,7 @@ class YoutubeDLMovieAgent(Agent.Movies):  # type: ignore
         results.Sort("score", descending=True)
 
     def get_mapping_file_path(self, current_dir) -> str | None:
-        """Find the mapping file, if it exists"""
+        """Find the mapping file, if it exists. It should be relative to the videos"""
         try:
             root_dir = os.path.abspath(".").split(os.path.sep)[0] + os.path.sep
             while (
@@ -76,38 +76,33 @@ class YoutubeDLMovieAgent(Agent.Movies):  # type: ignore
         with open(path, encoding="utf-8", mode="r") as json_file:
             map_data = json.load(json_file)
 
-            if yt_id in map_data["previously_imported"]:
+            # if we've already matched. skip the work
+            if yt_id in map_data["matched_ids"]:
                 log_internal("Already processed {}".format(yt_id))
-                return []
-            else:
-                map_data["previously_imported"].append(yt_id)
+                return
 
             def to_lower(s):
                 return string.lower(s)
 
-            unused_tags = {to_lower(t) for t in info_json["tags"]}
+            def log_match(id, name, data_values):
+                log_internal("Matched {} on {} with {}".format(id, name, data_values))
 
+            tags = {to_lower(t) for t in info_json["tags"]}
             for c in map_data["collections"]:
                 name = str(c["name"])
                 for r in c["rules"]:
                     dv = info_json[r["field"]]
                     rv = r["values"]
-
-                    log_internal(
-                        "Beginning rulecheck for {} - {} {}".format(
-                            name, r["field"], r["match"]
-                        )
-                    )
+                    msg = "Beginning rule check for {} - {} {}"
+                    log_internal(msg.format(name, r["field"], r["match"]))
 
                     # special handling for tags...if we match a tag we're done
                     if isinstance(dv, list) and r["field"] == "tags":
-                        matches = unused_tags & {to_lower(r) for r in rv}
+                        matches = tags & {to_lower(r) for r in rv}
                         if matches:
                             collection_matches.append(name)
-                            unused_tags = unused_tags - matches
-                            log_internal(
-                                "Matched {} om {} with {}".format(yt_id, name, matches)
-                            )
+                            tags = tags - matches
+                            log_match(yt_id, name, dv)
                             break
                     elif (
                         # partial matching list values is a bad idea imo
@@ -122,12 +117,24 @@ class YoutubeDLMovieAgent(Agent.Movies):  # type: ignore
                         )
                     ):
                         collection_matches.append(name)
-                        log_internal("Matched {} on {} with {}".format(yt_id, name, dv))
+                        log_match(yt_id, name, dv)
 
-            for tag in unused_tags:
-                if tag not in map_data["unmapped_tags"]:
-                    map_data["unmapped_tags"][tag] = 0
-                map_data["unmapped_tags"][tag] = int(map_data["unmapped_tags"][tag]) + 1
+            # tags remaining in the list are unused. We want to track those to see
+            # patterns on newly imported videos
+            for tag in tags:
+                if tag not in map_data["unmatched_tags"]:
+                    map_data["unmatched_tags"][tag] = 0
+                map_data["unmatched_tags"][tag] = (
+                    int(map_data["unmatched_tags"][tag]) + 1
+                )
+
+            # see /Framework/modelling/attributes.py#SetObject
+            collections = list(set(collection_matches))
+            if collections:
+                map_data["matched_ids"].append(yt_id)
+                metadata.collections.clear()
+                for c in collections:
+                    metadata.collections.add(c)
 
             log_internal("mapping json as dict {}".format(map_data))
             mapping_json = json.dumps(map_data, indent=2, encoding="utf-8")
@@ -136,17 +143,11 @@ class YoutubeDLMovieAgent(Agent.Movies):  # type: ignore
         with open(path, encoding="utf-8", mode="w") as f:
             f.write(unicode(mapping_json))  # type: ignore
 
-        collections = list(set(collection_matches))
         log_internal(
             "Finished mapping collections for {} with names {}".format(
                 yt_id, collections
             )
         )
-
-        # see /Framework/modelling/attributes.py#SetObject
-        metadata.collections.clear()
-        for c in collections:
-            metadata.collections.add(c)
 
     def update(self, metadata, media, lang, **kwargs):
         log_internal("".ljust(157, "="))

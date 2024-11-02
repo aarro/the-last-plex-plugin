@@ -1,0 +1,47 @@
+{
+  "collections": [
+    {
+      "rules": [
+        {
+          "field": "tags",
+          "values": ["gogo penguin", "gogopenguin"],
+          "match": "exact"
+        },
+        {
+          "field": "title",
+          "values": ["gogo penguin"],
+          "match": "in"
+        },
+        {
+          "field": "channel",
+          "values": ["gogo penguin", "gogo penguin vevo"],
+          "match": "exact"
+        }
+      ],
+      "name": "GoGo Penguin"
+    },
+    {
+      "rules": [
+        {
+          "field": "tags",
+          "values": ["Linkin Park", "LinkinPark"],
+          "match": "exact"
+        },
+        {
+          "field": "title",
+          "values": ["Linkin Park"],
+          "match": "in"
+        },
+        {
+          "field": "channel",
+          "values": ["Linkin Park"],
+          "match": "exact"
+        }
+      ],
+      "name": "Linkin Park"
+    }
+  ],
+  "matched_ids": [],
+  "unmatched_names": [],
+  "unmatched_tags": {}
+}

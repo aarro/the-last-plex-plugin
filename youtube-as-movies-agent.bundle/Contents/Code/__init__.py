@@ -7,7 +7,11 @@ import string
 import urllib2  # type: ignore
 from io import open
 
-FILE_NAME = "_collection_map.json"
+MAPPING_FILE_NAME = "_collection_map.json"
+SOURCE = "YouTube as Movies"
+LANGUAGES = [Locale.Language.NoLanguage, Locale.Language.English]  # type: ignore
+CON_AGENTS = ["com.plexapp.agents.none"]
+REF_AGENTS = ["com.plexapp.agents.localmedia"]
 
 
 def Start():
@@ -18,136 +22,130 @@ def log_internal(msg):
     Log(msg)  # type: ignore
 
 
+def log_match(id, name, data_values):
+    log_internal("Matched {} on {} with {}".format(id, name, data_values))
+
+
+def to_lower(s):
+    return string.lower(s)
+
+
 class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
-    name, primary_provider, fallback_agent, contributes_to, languages, accepts_from = (
-        "aarros-yt-dlp",
-        True,
-        False,
-        None,
-        [Locale.Language.English],  # type: ignore
-        None,
-    )
-
-    def search(self, results, media, lang, **_):
-        results.Append(
-            MetadataSearchResult(  # type: ignore
-                id="aarros-yt-dlp|{}|{}".format(
-                    media.filename, media.openSubtitlesHash
-                ),
-                name=media.title,
-                year=None,
-                lang=lang,
-                score=100,
-            )
-        )
-
-        results.Sort("score", descending=True)
+    accepts_from = REF_AGENTS
+    contributes_to = CON_AGENTS
+    fallback_agent = None
+    languages = LANGUAGES
+    name = SOURCE
+    primary_provider = True
 
     def get_mapping_file_path(self, current_dir) -> str | None:
         """Find the mapping file, if it exists. It should be relative to the videos"""
         try:
             root_dir = os.path.abspath(".").split(os.path.sep)[0] + os.path.sep
             while (
-                not os.path.exists(os.path.join(current_dir, FILE_NAME))
+                not os.path.exists(os.path.join(current_dir, MAPPING_FILE_NAME))
                 and not current_dir == root_dir
             ):
                 current_dir = os.path.dirname(current_dir)
 
-            path = os.path.join(current_dir, FILE_NAME)
+            path = os.path.join(current_dir, MAPPING_FILE_NAME)
             if os.path.exists(path):
                 log_internal("Found mapping file at: {}".format(path))
                 return path
             else:
-                log_internal("Unable to find {}".format(FILE_NAME))
+                log_internal("Unable to find {}".format(MAPPING_FILE_NAME))
         except Exception as e:
             log_internal("Failure loading collection mapping: {}".format(e))
 
         return None
 
     def set_collections(self, current_dir, info_json, metadata) -> None:
-        """Load the collection_map, update it and return any collections
-        that match.
         """
-        mapping_json = ""
+        Load the collection_map, update it and return any collections that match.
+        """
+        collection_mapping_file = self.get_mapping_file_path(current_dir)
         collection_matches = []
-        yt_id = info_json["id"]
-        path = self.get_mapping_file_path(current_dir)
+        v_id = info_json["id"]
+        mapping_json = ""
 
-        with open(path, encoding="utf-8", mode="r") as json_file:
-            map_data = json.load(json_file)
+        with open(collection_mapping_file, encoding="utf-8", mode="r") as json_file:
+            mapping_data = json.load(json_file)
 
             # if we've already matched. skip the work
-            if yt_id in map_data["matched_ids"]:
-                log_internal("Already processed {}".format(yt_id))
+            if v_id in mapping_data["matched_ids"]:
+                log_internal("Already processed {}".format(v_id))
                 return
 
-            def to_lower(s):
-                return string.lower(s)
-
-            def log_match(id, name, data_values):
-                log_internal("Matched {} on {} with {}".format(id, name, data_values))
-
             tags = {to_lower(t) for t in info_json["tags"]}
-            for c in map_data["collections"]:
-                name = str(c["name"])
+            for c in mapping_data["collections"]:
+                c_name = str(c["name"])
                 for r in c["rules"]:
-                    dv = info_json[r["field"]]
-                    rv = r["values"]
+                    field_name = r["field"]
+                    collection_rule_values = r["values"]
+                    metadata_field_values = info_json[field_name]
+
                     msg = "Beginning rule check for {} - {} {}"
-                    log_internal(msg.format(name, r["field"], r["match"]))
+                    log_internal(msg.format(c_name, field_name, r["match"]))
 
                     # special handling for tags...if we match a tag we're done
-                    if isinstance(dv, list) and r["field"] == "tags":
-                        matches = tags & {to_lower(r) for r in rv}
+                    if isinstance(metadata_field_values, list) and field_name == "tags":
+                        matches = tags & {to_lower(r) for r in collection_rule_values}
                         if matches:
-                            collection_matches.append(name)
+                            collection_matches.append(c_name)
                             tags = tags - matches
-                            log_match(yt_id, name, dv)
+                            log_match(v_id, c_name, metadata_field_values)
                             break
                     elif (
                         # partial matching list values is a bad idea imo
                         # so if data field values in a list, just exact match each one
-                        isinstance(dv, list)
-                        and {to_lower(d) for d in dv} & {to_lower(r) for r in rv}
+                        isinstance(metadata_field_values, list)
+                        and {to_lower(d) for d in metadata_field_values}
+                        & {to_lower(r) for r in collection_rule_values}
                     ) or (
-                        isinstance(dv, str)
+                        isinstance(metadata_field_values, str)
                         and (
-                            (r["match"] == "exact" and to_lower(rv) == to_lower(dv))
-                            or (r["match"] == "in" and to_lower(rv) in to_lower(dv))
+                            (
+                                r["match"] == "exact"
+                                and to_lower(collection_rule_values)
+                                == to_lower(metadata_field_values)
+                            )
+                            or (
+                                r["match"] == "in"
+                                and to_lower(collection_rule_values)
+                                in to_lower(metadata_field_values)
+                            )
                         )
                     ):
-                        collection_matches.append(name)
-                        log_match(yt_id, name, dv)
+                        collection_matches.append(c_name)
+                        log_match(v_id, c_name, metadata_field_values)
 
-            # tags remaining in the list are unused. We want to track those to see
-            # patterns on newly imported videos
-            for tag in tags:
-                if tag not in map_data["unmatched_tags"]:
-                    map_data["unmatched_tags"][tag] = 0
-                map_data["unmatched_tags"][tag] = (
-                    int(map_data["unmatched_tags"][tag]) + 1
-                )
-
-            # see /Framework/modelling/attributes.py#SetObject
             collections = list(set(collection_matches))
             if collections:
-                map_data["matched_ids"].append(yt_id)
+                mapping_data["matched_ids"].append(v_id)
+                # tags remaining in the list are unused. We want to track those to see
+                # patterns on newly imported videos
+                for tag in tags:
+                    if tag not in mapping_data["unmatched_tags"]:
+                        mapping_data["unmatched_tags"][tag] = 0
+                    mapping_data["unmatched_tags"][tag] = (
+                        int(mapping_data["unmatched_tags"][tag]) + 1
+                    )
+
+                # see /Framework/modelling/attributes.py#SetObject
                 metadata.collections.clear()
                 for c in collections:
                     metadata.collections.add(c)
+            elif v_id not in mapping_data["unmatched_ids"]:
+                mapping_data["unmatched_ids"].append(v_id)
 
-            log_internal("mapping json as dict {}".format(map_data))
-            mapping_json = json.dumps(map_data, indent=2, encoding="utf-8")
-            log_internal("mapping json as str {}".format(mapping_json))
+            mapping_json = json.dumps(mapping_data, indent=2, encoding="utf-8")
 
-        with open(path, encoding="utf-8", mode="w") as f:
-            f.write(unicode(mapping_json))  # type: ignore
+        if mapping_json:
+            with open(collection_mapping_file, encoding="utf-8", mode="w") as f:
+                f.write(unicode(mapping_json))  # type: ignore
 
-        log_internal(
-            "Finished mapping collections for {} with names {}".format(
-                yt_id, collections
-            )
-        )
+        finished_msg = "Finished mapping collections for {} with names {}"
+        log_internal(finished_msg.format(v_id, collections))
 
     def update(self, metadata, media, lang, **kwargs):
         log_internal("".ljust(157, "="))
@@ -186,6 +184,20 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
 
         except Exception as e:
             log_internal("update - error: filename: {}, e: {}".format(filename, e))
+
+    def search(self, results, media, lang, **_):
+        results.Append(
+            MetadataSearchResult(  # type: ignore
+                id="youtube-as-movies|{}|{}".format(
+                    media.filename, media.openSubtitlesHash
+                ),
+                name=media.title,
+                year=None,
+                lang=lang,
+                score=100,
+            )
+        )
+        results.Sort("score", descending=True)
 
 
 # ---- unused MetadataModel fields (baseclass)

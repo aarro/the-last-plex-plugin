@@ -38,7 +38,7 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
     name = SOURCE
     primary_provider = True
 
-    def get_mapping_file_path(self, current_dir) -> str | None:
+    def get_mapping_file_path(self, current_dir):
         """Find the mapping file, if it exists. It should be relative to the videos"""
         try:
             root_dir = os.path.abspath(".").split(os.path.sep)[0] + os.path.sep
@@ -59,7 +59,7 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
 
         return None
 
-    def set_collections(self, current_dir, info_json, metadata) -> None:
+    def set_collections(self, current_dir, info_json, metadata):
         """
         Load the collection_map, update it and return any collections that match.
         """

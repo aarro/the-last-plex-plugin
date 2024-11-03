@@ -81,47 +81,59 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
                 c_name = str(c["name"])
                 for r in c["rules"]:
                     field_name = r["field"]
-                    collection_rule_values = r["values"]
+                    match = r["match"]
+                    collection_rule_values = {to_lower(r) for r in r["values"]}
                     metadata_field_values = info_json[field_name]
 
-                    msg = "Beginning rule check for {} - {} {}"
-                    log_internal(msg.format(c_name, field_name, r["match"]))
-
-                    # special handling for tags...if we match a tag we're done
-                    if isinstance(metadata_field_values, list) and field_name == "tags":
-                        matches = tags & {to_lower(r) for r in collection_rule_values}
-                        if matches:
-                            collection_matches.append(c_name)
-                            tags = tags - matches
-                            log_match(v_id, c_name, metadata_field_values)
-                            break
+                    v_values = []
+                    if isinstance(metadata_field_values, list):
+                        v_values = [to_lower(v) for v in metadata_field_values]
+                        log_internal("{} is a list".format(metadata_field_values))
                     elif (
-                        # partial matching list values is a bad idea imo
-                        # so if data field values in a list, just exact match each one
-                        isinstance(metadata_field_values, list)
-                        and {to_lower(d) for d in metadata_field_values}
-                        & {to_lower(r) for r in collection_rule_values}
-                    ) or (
                         isinstance(metadata_field_values, str)
-                        and (
-                            (
-                                r["match"] == "exact"
-                                and to_lower(collection_rule_values)
-                                == to_lower(metadata_field_values)
-                            )
-                            or (
-                                r["match"] == "in"
-                                and to_lower(collection_rule_values)
-                                in to_lower(metadata_field_values)
+                        or isinstance(metadata_field_values, unicode),  # type: ignore
+                    ):
+                        v_values = [to_lower(metadata_field_values)]
+                        log_internal("{} is a str".format(metadata_field_values))
+                    else:
+                        msg = "Unable to process {}, unknown field type {}"
+                        log_internal(msg.format(v_id, type(metadata_field_values)))
+
+                    if v_values:
+                        log_internal(
+                            "Collection {} start rule check. INFO {} {} RULE {}".format(
+                                c_name, v_values, match, collection_rule_values
                             )
                         )
-                    ):
-                        collection_matches.append(c_name)
-                        log_match(v_id, c_name, metadata_field_values)
+
+                        if field_name == "tags":
+                            # special handling for tags...if we match a tag we're done
+                            matches = tags & collection_rule_values
+                            if matches:
+                                collection_matches.append(c_name)
+                                tags = tags - matches
+                                log_match(v_id, c_name, v_values)
+                                break
+                        elif (
+                            match == "exact" and collection_rule_values & set(v_values)
+                        ) or (
+                            match == "in"
+                            and [
+                                info_value
+                                for rule_value in list(collection_rule_values)
+                                for info_value in v_values
+                                if str(rule_value) in str(info_value)
+                            ]
+                        ):
+                            collection_matches.append(c_name)
+                            log_match(v_id, c_name, v_values)
+                        else:
+                            log_internal("No match found")
 
             collections = list(set(collection_matches))
             if collections:
                 mapping_data["matched_ids"].append(v_id)
+                mapping_data["unmatched_ids"].remove(v_id)
                 # tags remaining in the list are unused. We want to track those to see
                 # patterns on newly imported videos
                 for tag in tags:

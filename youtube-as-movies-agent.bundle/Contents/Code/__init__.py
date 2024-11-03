@@ -88,13 +88,11 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
                     v_values = []
                     if isinstance(metadata_field_values, list):
                         v_values = [to_lower(v) for v in metadata_field_values]
-                        log_internal("{} is a list".format(metadata_field_values))
                     elif (
                         isinstance(metadata_field_values, str)
                         or isinstance(metadata_field_values, unicode),  # type: ignore
                     ):
                         v_values = [to_lower(metadata_field_values)]
-                        log_internal("{} is a str".format(metadata_field_values))
                     else:
                         msg = "Unable to process {}, unknown field type {}"
                         log_internal(msg.format(v_id, type(metadata_field_values)))
@@ -130,25 +128,33 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
                         else:
                             log_internal("No match found")
 
+            # if we matched on a collection, reset the file's collections to it
             collections = list(set(collection_matches))
+            fresh_append = False
             if collections:
-                mapping_data["matched_ids"].append(v_id)
+                # see /Framework/modelling/attributes.py#SetObject
+                metadata.collections.clear()
+                for c in collections:
+                    metadata.collections.add(c)
+
+                # remove it from the unmatched_ids and ensure that it's in matched_ids
                 mapping_data["unmatched_ids"].remove(v_id)
-                # tags remaining in the list are unused. We want to track those to see
-                # patterns on newly imported videos
+                if v_id not in mapping_data["matched_ids"]:
+                    mapping_data["matched_ids"].append(v_id)
+                    fresh_append = True
+            elif v_id not in mapping_data["unmatched_ids"]:
+                mapping_data["unmatched_ids"].append(v_id)
+                fresh_append = True
+
+            # tags remaining in the list are unused. We want to track those to see
+            # patterns on newly imported videos, but don't want to double-track
+            if fresh_append:
                 for tag in tags:
                     if tag not in mapping_data["unmatched_tags"]:
                         mapping_data["unmatched_tags"][tag] = 0
                     mapping_data["unmatched_tags"][tag] = (
                         int(mapping_data["unmatched_tags"][tag]) + 1
                     )
-
-                # see /Framework/modelling/attributes.py#SetObject
-                metadata.collections.clear()
-                for c in collections:
-                    metadata.collections.add(c)
-            elif v_id not in mapping_data["unmatched_ids"]:
-                mapping_data["unmatched_ids"].append(v_id)
 
             mapping_json = json.dumps(mapping_data, indent=2, encoding="utf-8")
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import os
+import collections
 import json
+import operator
+import os
 import string
 import urllib2  # type: ignore
 from io import open
@@ -15,15 +17,19 @@ REF_AGENTS = ["com.plexapp.agents.localmedia"]
 
 
 def Start():
-    log_internal("Starting up ...")
+    log_info("", "Starting up ...")
 
 
-def log_internal(msg):
-    Log(msg)  # type: ignore
+def log_info(v_id, msg):
+    Log.Info("{} - {}".format(v_id, msg))  # type: ignore
 
 
-def log_match(id, name, data_values):
-    log_internal("Matched {} on {} with {}".format(id, name, data_values))
+def log_error(v_id, msg):
+    Log.Error("{} - {}".format(v_id, msg))  # type: ignore
+
+
+def log_match(v_id, name, data_values):
+    log_info(v_id, "Matched on {} with {}".format(name, data_values))
 
 
 def to_lower(s):
@@ -38,7 +44,7 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
     name = SOURCE
     primary_provider = True
 
-    def get_mapping_file_path(self, current_dir):
+    def get_mapping_file_path(self, v_id, current_dir):
         """Find the mapping file, if it exists. It should be relative to the videos"""
         try:
             root_dir = os.path.abspath(".").split(os.path.sep)[0] + os.path.sep
@@ -50,12 +56,12 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
 
             path = os.path.join(current_dir, MAPPING_FILE_NAME)
             if os.path.exists(path):
-                log_internal("Found mapping file at: {}".format(path))
+                log_info(v_id, "Found mapping file at: {}".format(path))
                 return path
             else:
-                log_internal("Unable to find {}".format(MAPPING_FILE_NAME))
+                log_info(v_id, "Unable to find {}".format(MAPPING_FILE_NAME))
         except Exception as e:
-            log_internal("Failure loading collection mapping: {}".format(e))
+            log_info(v_id, "Failure loading collection mapping: {}".format(e))
 
         return None
 
@@ -63,9 +69,9 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
         """
         Load the collection_map, update it and return any collections that match.
         """
-        collection_mapping_file = self.get_mapping_file_path(current_dir)
-        collection_matches = []
         v_id = info_json["id"]
+        collection_mapping_file = self.get_mapping_file_path(v_id, current_dir)
+        collection_matches = []
         mapping_json = ""
 
         with open(collection_mapping_file, encoding="utf-8", mode="r") as json_file:
@@ -73,14 +79,23 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
 
             # if we've already matched. skip the work
             if v_id in mapping_data["matched_ids"]:
-                log_internal("Already processed {}".format(v_id))
-                return
+                log_info(v_id, "Already processed, skipping collection processing.")
+                return "prior_match"
 
-            tags = {to_lower(t) for t in info_json["tags"]}
+            tags = (
+                {to_lower(t) for t in info_json["tags"]}
+                if info_json.has_key("tags")
+                else []
+            )
+
             for c in mapping_data["collections"]:
                 c_name = str(c["name"])
                 for r in c["rules"]:
                     field_name = r["field"]
+                    if not info_json.has_key(field_name):
+                        log_info(v_id, "field {} not found".format(field_name))
+                        continue
+
                     match = r["match"]
                     collection_rule_values = {to_lower(r) for r in r["values"]}
                     metadata_field_values = info_json[field_name]
@@ -94,14 +109,14 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
                     ):
                         v_values = [to_lower(metadata_field_values)]
                     else:
-                        msg = "Unable to process {}, unknown field type {}"
-                        log_internal(msg.format(v_id, type(metadata_field_values)))
+                        msg = "Unable to process, unknown field type {}"
+                        log_info(v_id, msg.format(type(metadata_field_values)))
 
                     if v_values:
-                        log_internal(
-                            "Collection {} start rule check. INFO {} {} RULE {}".format(
-                                c_name, v_values, match, collection_rule_values
-                            )
+                        msg = "Collection {} start rule check. RULE {} {} INFO {}"
+                        log_info(
+                            v_id,
+                            msg.format(c_name, collection_rule_values, match, v_values),
                         )
 
                         if field_name == "tags":
@@ -126,19 +141,20 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
                             collection_matches.append(c_name)
                             log_match(v_id, c_name, v_values)
                         else:
-                            log_internal("No match found")
+                            log_info(v_id, "No match found")
 
             # if we matched on a collection, reset the file's collections to it
-            collections = list(set(collection_matches))
+            c_matches = list(set(collection_matches))
             fresh_append = False
-            if collections:
+            if c_matches:
                 # see /Framework/modelling/attributes.py#SetObject
                 metadata.collections.clear()
-                for c in collections:
+                for c in c_matches:
                     metadata.collections.add(c)
 
                 # remove it from the unmatched_ids and ensure that it's in matched_ids
-                mapping_data["unmatched_ids"].remove(v_id)
+                if v_id in mapping_data["unmatched_ids"]:
+                    mapping_data["unmatched_ids"].remove(v_id)
                 if v_id not in mapping_data["matched_ids"]:
                     mapping_data["matched_ids"].append(v_id)
                     fresh_append = True
@@ -148,13 +164,19 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
 
             # tags remaining in the list are unused. We want to track those to see
             # patterns on newly imported videos, but don't want to double-track
-            if fresh_append:
+            if fresh_append and tags:
                 for tag in tags:
                     if tag not in mapping_data["unmatched_tags"]:
                         mapping_data["unmatched_tags"][tag] = 0
                     mapping_data["unmatched_tags"][tag] = (
                         int(mapping_data["unmatched_tags"][tag]) + 1
                     )
+                sorted_tags = sorted(
+                    mapping_data["unmatched_tags"].items(),
+                    key=operator.itemgetter(1),
+                    reverse=True,
+                )
+                mapping_data["unmatched_tags"] = collections.OrderedDict(sorted_tags)
 
             mapping_json = json.dumps(mapping_data, indent=2, encoding="utf-8")
 
@@ -162,12 +184,11 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
             with open(collection_mapping_file, encoding="utf-8", mode="w") as f:
                 f.write(unicode(mapping_json))  # type: ignore
 
-        finished_msg = "Finished mapping collections for {} with names {}"
-        log_internal(finished_msg.format(v_id, collections))
+        finished_msg = "Finished mapping collections with names {}"
+        log_info(v_id, finished_msg.format(c_matches))
+        return "matched" if collection_matches else "unmatched"
 
     def update(self, metadata, media, lang, **kwargs):
-        log_internal("".ljust(157, "="))
-
         try:
             filename = media.items[0].parts[0].file
             current_dir = os.path.dirname(filename)
@@ -178,10 +199,11 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
                 os.path.splitext(filename)[0] + ".info.json",
             )
             if os.path.exists(info_json_file_path):
-                log_internal("info : found {}".format(info_json_file_path))
+                log_info("", "info : found {}".format(info_json_file_path))
             else:
-                log_internal(
-                    "warn : missing {} in {}".format(info_json_file_path, current_dir)
+                log_info(
+                    "",
+                    "warn : missing {} in {}".format(info_json_file_path, current_dir),
                 )
                 return
 
@@ -191,9 +213,11 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
                 date = Datetime.ParseDate(info_json["upload_date"])  # type: ignore
 
                 metadata.duration = info_json["duration"]
-                metadata.genres = info_json["categories"]
-                metadata.originally_available_at = date.date()
                 metadata.studio = info_json["extractor"]
+                metadata.genres = (
+                    info_json["categories"] if info_json.has_key("categories") else []
+                )
+                metadata.originally_available_at = date.date()
                 metadata.summary = info_json["description"]
                 metadata.title = info_json["title"]
                 metadata.year = date.year
@@ -201,7 +225,7 @@ class YoutubeAsMovieAgent(Agent.Movies):  # type: ignore
                 self.set_collections(current_dir, info_json, metadata)
 
         except Exception as e:
-            log_internal("update - error: filename: {}, e: {}".format(filename, e))
+            log_error("", "filename: {}, e: {}".format(filename, e))
 
     def search(self, results, media, lang, **_):
         results.Append(

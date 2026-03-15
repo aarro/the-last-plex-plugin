@@ -1,0 +1,62 @@
+# YAMP — YouTube Auto Metadata Provider
+# Template docker-compose with all three services sharing a youtube downloads volume.
+#
+# Setup:
+#   1. Set the 'device' path under volumes.youtube-data to your downloads folder
+#   2. Copy .env.example to .env and fill in your values
+#   3. docker compose up -d
+
+volumes:
+  youtube-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      # Path to your yt-dlp/MeTube downloads folder on the host
+      device: /path/to/your/youtube/downloads
+
+services:
+  # ── Plex Media Server ───────────────────────────────────────────────────────
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    network_mode: host         # Required for local network discovery
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago     # Your timezone
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM}   # Get from plex.tv/claim
+    volumes:
+      - /path/to/plex/config:/config
+      - youtube-data:/youtube  # Mount downloads as a Plex library source
+    restart: unless-stopped
+
+  # ── MeTube (yt-dlp web UI) ─────────────────────────────────────────────────
+  metube:
+    image: ghcr.io/alexta69/metube:latest
+    container_name: metube
+    ports:
+      - "8081:8081"
+    environment:
+      - DOWNLOAD_DIR=/downloads
+      # Write .info.json sidecars alongside every download (required by YAMP)
+      - YTDL_OPTIONS={"writeinfojson":true,"writethumbnail":false}
+    volumes:
+      - youtube-data:/downloads
+    restart: unless-stopped
+
+  # ── YAMP ───────────────────────────────────────────────────────────────────
+  yamp:
+    image: ghcr.io/aarro/the-last-plex-plugin:latest
+    container_name: yamp
+    ports:
+      - "${PORT:-8765}:8765"
+    environment:
+      - YOUTUBE_DATA_PATH=/data
+      - PLEX_URL=${PLEX_URL}         # e.g. http://plex:32400 or http://host-ip:32400
+      - PLEX_TOKEN=${PLEX_TOKEN}     # Your X-Plex-Token
+      - PORT=8765
+    volumes:
+      - youtube-data:/data
+    restart: unless-stopped

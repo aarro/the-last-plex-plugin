@@ -50,5 +50,6 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ needs.tag.outputs.new_tag }}
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

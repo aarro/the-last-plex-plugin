@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from collection_map import find_collection_map, resolve_collections
+from collection_map import match_video, find_collection_map, recompute_all_collections, resolve_collections
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -155,22 +155,19 @@ def test_duplicate_collections_deduplicated(tmp_path):
 # ── match_type allowlist ──────────────────────────────────────────────────────
 
 
-def test_wrong_case_match_type_does_not_match(tmp_path):
-    """Rules with wrong-case match type (e.g. 'EXACT') must be skipped."""
+def test_invalid_match_type_still_writes_unmatched_state(tmp_path):
+    """When all rules have invalid match types, the map file still tracks the video as unmatched."""
     info = _load_info()
     info["id"] = "wrong_match_type_001"
     info["tags"] = []
     info["title"] = "Something Unrelated"
     info["channel"] = "RandomChannel"
 
-    # Build a map with a rule that uses "EXACT" (wrong case) — should be rejected
     map_data = {
         "collections": [
             {
                 "name": "Bad Rule Collection",
-                "rules": [
-                    {"field": "channel", "match": "EXACT", "values": ["RandomChannel"]},
-                ],
+                "rules": [{"field": "channel", "match": "EXACT", "values": ["RandomChannel"]}],
             }
         ],
         "matched_ids": [],
@@ -182,6 +179,155 @@ def test_wrong_case_match_type_does_not_match(tmp_path):
 
     result = resolve_collections(info, str(map_path))
     assert result == []
+
+    saved = json.loads(map_path.read_text(encoding="utf-8"))
+    assert info["id"] in saved["unmatched_ids"]
+    assert info["id"] not in saved["matched_ids"]
+
+
+# ── match_video ──────────────────────────────────────────────────────────────
+
+
+def _collections():
+    """Return the fixture collection list (without file I/O)."""
+    with open(FIXTURES / "_collection_map.json", encoding="utf-8") as f:
+        return json.load(f)["collections"]
+
+
+def test_match_video_tag_match():
+    info = _load_info()
+    matches, remaining = match_video(info, _collections())
+    assert "GoGo Penguin" in matches
+
+
+def test_match_video_returns_remaining_tags():
+    info = _load_info()
+    info["tags"] = ["gogo penguin", "jazz", "live"]
+    matches, remaining = match_video(info, _collections())
+    assert "GoGo Penguin" in matches
+    # "gogo penguin" was consumed; "jazz" and "live" should remain
+    assert "gogo penguin" not in remaining
+    assert "jazz" in remaining
+    assert "live" in remaining
+
+
+def test_match_video_no_match_returns_all_tags():
+    info = _load_info()
+    info["tags"] = ["ambient", "electronic"]
+    info["title"] = "Some Random Video"
+    info["channel"] = "RandomChannel"
+    matches, remaining = match_video(info, _collections())
+    assert matches == []
+    assert "ambient" in remaining
+    assert "electronic" in remaining
+
+
+def test_match_video_in_title():
+    info = _load_info()
+    info["tags"] = []
+    matches, _ = match_video(info, _collections())
+    assert "GoGo Penguin" in matches
+
+
+def test_match_video_pure_does_not_mutate_info():
+    info = _load_info()
+    original_tags = list(info["tags"])
+    match_video(info, _collections())
+    assert info["tags"] == original_tags
+
+
+# ── recompute_all_collections ─────────────────────────────────────────────────
+
+
+def test_recompute_all_collections_basic(tmp_path):
+    _, map_path = _fresh_map(tmp_path)
+    info = _load_info()
+
+    # Write info.json into tmp_path so recompute can find it
+    info_path = tmp_path / f"{info['id']}.info.json"
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    video_index = {info["id"]: str(info_path)}
+    stats = recompute_all_collections(video_index, map_path)
+
+    assert stats["matched"] == 1
+    assert stats["unmatched"] == 0
+    data = _load_map(map_path)
+    assert info["id"] in data["matched_ids"]
+    assert info["id"] not in data["unmatched_ids"]
+
+
+def test_recompute_clears_stale_state(tmp_path):
+    _, map_path = _fresh_map(tmp_path)
+    info = _load_info()
+
+    # Pre-populate with stale state
+    data = _load_map(map_path)
+    data["matched_ids"] = ["stale_id_1", "stale_id_2"]
+    data["unmatched_ids"] = ["stale_id_3"]
+    data["unmatched_tags"] = {"stale_tag": 99}
+    with open(map_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    info_path = tmp_path / f"{info['id']}.info.json"
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    recompute_all_collections({info["id"]: str(info_path)}, map_path)
+    data = _load_map(map_path)
+
+    assert "stale_id_1" not in data["matched_ids"]
+    assert "stale_id_3" not in data["unmatched_ids"]
+    assert "stale_tag" not in data["unmatched_tags"]
+
+
+def test_recompute_tracks_unmatched_tags(tmp_path):
+    _, map_path = _fresh_map(tmp_path)
+
+    unmatched_info = {
+        "id": "unmatched_001",
+        "title": "No Match",
+        "channel": "SomeChannel",
+        "tags": ["ambient", "electronic", "downtempo"],
+        "upload_date": "20230101",
+    }
+    info_path = tmp_path / "unmatched_001.info.json"
+    info_path.write_text(json.dumps(unmatched_info), encoding="utf-8")
+
+    recompute_all_collections({"unmatched_001": str(info_path)}, map_path)
+    data = _load_map(map_path)
+
+    assert "unmatched_001" in data["unmatched_ids"]
+    assert "ambient" in data["unmatched_tags"]
+    assert "electronic" in data["unmatched_tags"]
+
+
+def test_recompute_newly_matched_tag_removed_from_unmatched(tmp_path):
+    """Adding a collection should move a previously-unmatched video to matched."""
+    _, map_path = _fresh_map(tmp_path)
+
+    info = _load_info()
+    info_path = tmp_path / f"{info['id']}.info.json"
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    # First pass: no matching collections → unmatched
+    no_collections_map = _load_map(map_path)
+    no_collections_map["collections"] = []
+    with open(map_path, "w", encoding="utf-8") as f:
+        json.dump(no_collections_map, f)
+
+    recompute_all_collections({info["id"]: str(info_path)}, map_path)
+    data = _load_map(map_path)
+    assert info["id"] in data["unmatched_ids"]
+
+    # Restore collections and recompute — video should now be matched
+    data["collections"] = _collections()
+    with open(map_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    recompute_all_collections({info["id"]: str(info_path)}, map_path)
+    data = _load_map(map_path)
+    assert info["id"] in data["matched_ids"]
+    assert info["id"] not in data["unmatched_ids"]
 
 
 # ── find_collection_map ───────────────────────────────────────────────────────
@@ -206,3 +352,110 @@ def test_find_collection_map_walk_up(tmp_path):
 def test_find_collection_map_not_found(tmp_path):
     found = find_collection_map(str(tmp_path), str(tmp_path))
     assert found is None
+
+
+# ── match_video edge cases ────────────────────────────────────────────────────
+
+
+def test_match_video_invalid_match_type_logged_and_skipped(caplog):
+    """Rules with wrong-case match type must be skipped (and logged as warning)."""
+    import logging
+
+    info = _load_info()
+    collections = [
+        {
+            "name": "Bad Rule Collection",
+            "rules": [{"field": "channel", "match": "EXACT", "values": ["GoGo Penguin Music"]}],
+        }
+    ]
+    with caplog.at_level(logging.WARNING, logger="collection_map"):
+        result, _ = match_video(info, collections)
+    assert result == []
+    assert any("unknown match_type" in r.message for r in caplog.records)
+
+
+def test_match_video_field_not_in_info_json():
+    """Rules referencing a field absent from info_json must be skipped silently."""
+    info = _load_info()
+    collections = [
+        {
+            "name": "Missing Field Collection",
+            "rules": [{"field": "nonexistent_field", "match": "exact", "values": ["anything"]}],
+        }
+    ]
+    result, _ = match_video(info, collections)
+    assert result == []
+
+
+def test_match_video_empty_collections():
+    """Passing an empty collections list returns no matches and all tags."""
+    info = _load_info()
+    info["tags"] = ["jazz", "live"]
+    result, remaining = match_video(info, [])
+    assert result == []
+    assert "jazz" in remaining
+    assert "live" in remaining
+
+
+def test_match_video_dedup_non_tag_rules():
+    """A collection matched by both title and channel rules appears exactly once."""
+    info = _load_info()
+    info["tags"] = []
+    info["title"] = "gogo penguin live"
+    info["channel"] = "gogo penguin"
+    collections = [
+        {
+            "name": "Dedup Test",
+            "rules": [
+                {"field": "title", "match": "in", "values": ["gogo penguin"]},
+                {"field": "channel", "match": "exact", "values": ["gogo penguin"]},
+            ],
+        }
+    ]
+    result, _ = match_video(info, collections)
+    assert result.count("Dedup Test") == 1
+
+
+def test_recompute_skips_corrupt_file(tmp_path):
+    """A corrupt .info.json is skipped; valid entries are still processed."""
+    _, map_path = _fresh_map(tmp_path)
+
+    good_info = _load_info()
+    good_path = tmp_path / f"{good_info['id']}.info.json"
+    good_path.write_text(json.dumps(good_info), encoding="utf-8")
+
+    bad_path = tmp_path / "corrupt_video_id.info.json"
+    bad_path.write_text("not valid json {{{{", encoding="utf-8")
+
+    video_index = {
+        good_info["id"]: str(good_path),
+        "corrupt_video_id": str(bad_path),
+    }
+    stats = recompute_all_collections(video_index, map_path)
+
+    # Only the valid video is counted
+    assert stats["matched"] + stats["unmatched"] == 1
+    data = _load_map(map_path)
+    assert "corrupt_video_id" not in data["matched_ids"]
+    assert "corrupt_video_id" not in data["unmatched_ids"]
+
+
+def test_recompute_empty_index(tmp_path):
+    """Empty video index clears all state and returns zeros."""
+    _, map_path = _fresh_map(tmp_path)
+
+    # Pre-populate with stale data
+    data = _load_map(map_path)
+    data["matched_ids"] = ["old_id"]
+    data["unmatched_ids"] = ["other_id"]
+    data["unmatched_tags"] = {"jazz": 5}
+    with open(map_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    stats = recompute_all_collections({}, map_path)
+    assert stats == {"matched": 0, "unmatched": 0}
+
+    result = _load_map(map_path)
+    assert result["matched_ids"] == []
+    assert result["unmatched_ids"] == []
+    assert result["unmatched_tags"] == {}

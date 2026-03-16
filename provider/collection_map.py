@@ -62,12 +62,106 @@ def save_map(mapping_path: str, data: dict) -> None:
         raise
 
 
+def match_video(info_json: dict, collections: list[dict]) -> tuple[list[str], set[str]]:
+    """
+    Pure function: apply collection rules to a video.
+
+    Returns (matched_names, remaining_tags) where remaining_tags excludes
+    any tags consumed during collection matching.
+    """
+    tags = {t.lower() for t in info_json.get("tags", [])}
+    collection_matches: list[str] = []
+
+    for collection in collections:
+        c_name = str(collection.get("name", ""))
+        for rule in collection.get("rules", []):
+            field_name = rule.get("field")
+            match_type = rule.get("match")
+            rule_values_raw = rule.get("values")
+            if not field_name or not match_type or not rule_values_raw:
+                continue
+            if match_type not in ("exact", "in"):
+                logger.warning("match_video: unknown match_type %r in collection '%s' rule — skipping", match_type, c_name)
+                continue
+            if field_name not in info_json:
+                continue
+
+            rule_values = {v.lower() for v in rule_values_raw}
+            raw = info_json[field_name]
+
+            if isinstance(raw, list):
+                v_values = [v.lower() for v in raw]
+            elif isinstance(raw, str):
+                v_values = [raw.lower()]
+            else:
+                continue
+
+            if field_name == "tags":
+                matched = tags & rule_values
+                if matched:
+                    collection_matches.append(c_name)
+                    tags -= matched
+                    break
+            elif match_type == "exact" and rule_values & set(v_values):
+                collection_matches.append(c_name)
+                break
+            elif match_type == "in" and any(rv in iv for rv in rule_values for iv in v_values):
+                collection_matches.append(c_name)
+                break
+
+    return list(set(collection_matches)), tags
+
+
+def recompute_all_collections(video_index: dict[str, str], mapping_path: str) -> dict:
+    """
+    Re-run collection matching against all indexed videos.
+
+    Clears and rebuilds matched_ids, unmatched_ids, and unmatched_tags from scratch.
+    Returns {"matched": int, "unmatched": int} stats.
+    """
+    with _MAP_LOCK:
+        mapping_data = load_map(mapping_path)
+        collections = mapping_data.get("collections", [])
+
+        matched_ids: list[str] = []
+        unmatched_ids: list[str] = []
+        unmatched_tags: dict[str, int] = {}
+
+        for video_id, path in video_index.items():
+            try:
+                with open(path, encoding="utf-8") as f:
+                    info_json = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning("recompute: skipping %s: %s", video_id, e)
+                continue
+
+            c_matches, _ = match_video(info_json, collections)
+            if c_matches:
+                matched_ids.append(video_id)
+            else:
+                unmatched_ids.append(video_id)
+                for tag in info_json.get("tags", []):
+                    t = tag.lower()
+                    unmatched_tags[t] = unmatched_tags.get(t, 0) + 1
+
+        mapping_data["matched_ids"] = matched_ids
+        mapping_data["unmatched_ids"] = unmatched_ids
+        mapping_data["unmatched_tags"] = dict(
+            sorted(unmatched_tags.items(), key=operator.itemgetter(1), reverse=True)
+        )
+
+        save_map(mapping_path, mapping_data)
+        logger.info("recompute_all_collections: %d matched, %d unmatched", len(matched_ids), len(unmatched_ids))
+        return {"matched": len(matched_ids), "unmatched": len(unmatched_ids)}
+
+
 def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
     """
     Apply collection rules to a video's info_json.
 
-    Updates the mapping file with match state and unmatched tag counts.
-    Returns list of matched collection names.
+    Updates the mapping file with match state and unmatched tag counts only
+    if this video has not been previously tracked (not in matched_ids or
+    unmatched_ids). Returns list of matched collection names.
     """
     with _MAP_LOCK:
         v_id = info_json.get("id", "")
@@ -75,60 +169,14 @@ def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
 
         already_matched = v_id in mapping_data.get("matched_ids", [])
 
-        # Always compute collections so Plex gets the right data on every fetch
-        tags = {t.lower() for t in info_json.get("tags", [])}
-        collection_matches: list[str] = []
+        # Always compute collections so Plex gets the right data on every fetch;
+        # state updates (file writes) are skipped for already-tracked videos.
+        c_matches, remaining_tags = match_video(info_json, mapping_data.get("collections", []))
 
-        for collection in mapping_data.get("collections", []):
-            c_name = str(collection.get("name", ""))
-            for rule in collection.get("rules", []):
-                field_name = rule.get("field")
-                match_type = rule.get("match")
-                rule_values_raw = rule.get("values")
-                if not field_name or not match_type or not rule_values_raw:
-                    continue
-                if match_type not in ("exact", "in"):
-                    logger.warning("%s: Unknown match type %r in collection '%s' — skipping rule", v_id, match_type, c_name)
-                    continue
-
-                if field_name not in info_json:
-                    logger.info("%s: field '%s' not found in info_json", v_id, field_name)
-                    continue
-
-                rule_values = {v.lower() for v in rule_values_raw}
-                raw = info_json[field_name]
-
-                if isinstance(raw, list):
-                    v_values = [v.lower() for v in raw]
-                elif isinstance(raw, str):
-                    v_values = [raw.lower()]
-                else:
-                    logger.info("%s: Unknown field type %s for '%s'", v_id, type(raw), field_name)
-                    continue
-
-                logger.info(
-                    "%s: Collection '%s' rule check — field=%s match=%s rule=%s info=%s",
-                    v_id, c_name, field_name, match_type, rule_values, v_values,
-                )
-
-                if field_name == "tags":
-                    # Tags: set intersection; consuming matched tags prevents double-counting
-                    matched = tags & rule_values
-                    if matched:
-                        collection_matches.append(c_name)
-                        tags -= matched
-                        logger.info("%s: Matched '%s' on tags %s", v_id, c_name, matched)
-                        break
-                elif match_type == "exact" and rule_values & set(v_values):
-                    collection_matches.append(c_name)
-                    logger.info("%s: Matched '%s' (exact) with %s", v_id, c_name, v_values)
-                elif match_type == "in" and any(rv in iv for rv in rule_values for iv in v_values):
-                    collection_matches.append(c_name)
-                    logger.info("%s: Matched '%s' (in) with %s", v_id, c_name, v_values)
-                else:
-                    logger.info("%s: No match for collection '%s'", v_id, c_name)
-
-        c_matches = list(set(collection_matches))
+        logger.info(
+            "%s: Collection matching result: %s (remaining tags: %s)",
+            v_id, c_matches, remaining_tags,
+        )
 
         # Only update state if this is a new video (not yet tracked)
         if not already_matched:
@@ -146,9 +194,9 @@ def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
                 fresh_append = True
 
             # Track unused tags from newly-seen unmatched videos to surface collection patterns
-            if fresh_append and tags:
+            if fresh_append and remaining_tags:
                 unmatched_tags: dict[str, int] = mapping_data.setdefault("unmatched_tags", {})
-                for tag in tags:
+                for tag in remaining_tags:
                     try:
                         current = int(unmatched_tags.get(tag, 0))
                     except (ValueError, TypeError):

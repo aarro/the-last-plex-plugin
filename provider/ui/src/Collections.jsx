@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-const FIELDS = ["tags", "title", "channel"];
+const FIELDS = ["tags", "title", "channel", "uploader", "categories", "description", "extractor"];
 const MATCHES = ["exact", "in"];
 
 function emptyRule() {

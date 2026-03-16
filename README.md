@@ -30,12 +30,13 @@ git clone https://github.com/aarro/the-last-plex-plugin
 cd the-last-plex-plugin/provider
 
 # 1. Edit docker-compose.yml — set the youtube-data volume device path
-# 2. Create .env with your PLEX_URL, PLEX_TOKEN, PLEX_CLAIM
+# 2. Create .env with PLEX_URL, PLEX_TOKEN, PLEX_CLAIM, and YAMP_URL
+#    YAMP_URL is the address Plex uses to load local thumbnails, e.g. http://192.168.1.10:8765
 
 docker compose up -d --build
 ```
 
-Then in Plex: **Settings → Agents → Add Agent** → enter `http://<host>:8765/movies`.
+Then in Plex: **Settings → Troubleshooting → Metadata Agents → Add Agent** → enter `http://<host>:8765/movies`.
 
 See [CLAUDE.md](CLAUDE.md) for full documentation.
 

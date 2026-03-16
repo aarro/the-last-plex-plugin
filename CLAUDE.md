@@ -19,6 +19,7 @@ the-last-plex-plugin/
         └── src/
             ├── App.jsx                   # Root: fetches data, owns state, action bar
             ├── Collections.jsx           # Collection list with rule editor
+            ├── VideoList.jsx             # Video grid with collection badges
             └── UnmatchedTags.jsx         # Unmatched tag chips with "create" action
 ```
 
@@ -37,7 +38,7 @@ When Plex calls the match endpoint with a filename, `extract_video_id()` in `met
 1. **`GET /movies`** — Plex discovers the provider. Returns `MediaProvider` JSON with identifier `tv.plex.agents.custom.yamp`.
 2. **`POST /movies/library/metadata/matches`** — Plex sends `{filename, title, year}`. We extract the video ID, find the `.info.json`, and return a match stub.
 3. **`GET /movies/library/metadata/{rating_key}`** — Plex fetches full metadata. We read the `.info.json`, run collection matching, and return the full response.
-4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the YouTube thumbnail as `coverPoster`.
+4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the thumbnail as `coverPoster`. Prefers a local file (`.jpg`/`.png`/`.webp`) alongside the `.info.json`; falls back to the YouTube URL from `thumbnail`.
 
 `rating_key` format: `youtube-{video_id}`.
 
@@ -48,7 +49,7 @@ When Plex calls the match endpoint with a filename, `extract_video_id()` in `met
 | `title`             | `title`                 |
 | `description`       | `summary`               |
 | `upload_date`       | `originallyAvailableAt` (YYYY-MM-DD), `year` |
-| `duration` (sec)    | `duration` (ms × 1000)  |
+| `duration` (sec)    | `duration` (sec × 1000 → ms) |
 | `extractor`         | `studio`                |
 | `categories`        | `Genre[].tag`           |
 | `channel`           | `Director[].tag`        |
@@ -134,6 +135,7 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 | `PLEX_TOKEN`         | —        | Your X-Plex-Token                    |
 | `PORT`               | `8765`   | Port the server listens on           |
 | `API_KEY`            | —        | Bearer token for write API endpoints (`PUT /api/collections`, `POST /api/rescan`, `POST /api/index/rebuild`). If unset, those endpoints are open (backward-compatible). |
+| `YAMP_URL`           | —        | Public URL of this YAMP instance (e.g. `http://192.168.1.10:8765`). Required for Plex to load local thumbnails. |
 
 ## Key Files
 

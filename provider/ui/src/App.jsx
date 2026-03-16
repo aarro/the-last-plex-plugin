@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Collections from "./Collections.jsx";
 import UnmatchedTags from "./UnmatchedTags.jsx";
+import VideoList from "./VideoList.jsx";
 
 const API = "";
 
@@ -34,8 +35,9 @@ export default function App() {
         body: JSON.stringify({ collections: data.collections }),
       });
       if (!res.ok) throw new Error(await res.text());
-      setDirty(false);
-      setStatus({ type: "ok", msg: "Saved." });
+      const result = await res.json();
+      setStatus({ type: "ok", msg: `Saved — ${result.matched} matched, ${result.unmatched} unmatched.` });
+      await load();
     } catch (e) {
       setStatus({ type: "err", msg: `Save failed: ${e.message}` });
     } finally {
@@ -98,6 +100,8 @@ export default function App() {
         tags={data.unmatched_tags}
         onCreateCollection={createCollectionFromTag}
       />
+
+      <VideoList />
 
       <div className="action-bar">
         {status && (

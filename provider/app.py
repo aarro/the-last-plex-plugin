@@ -47,13 +47,21 @@ MATCH_KEY = "/movies/library/metadata/matches"
 # Maps video_id → absolute path to its .info.json file
 
 _video_index: dict[str, str] = {}
+_stem_index: dict[str, str] = {}   # info.json filename stem → video_id (match endpoint fallback)
 _last_rebuild: float = 0.0
 _REBUILD_COOLDOWN = 60.0
 
 
-def build_index(data_path: str) -> dict[str, str]:
-    """Walk data_path and index all .info.json files by video ID."""
+def build_index(data_path: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Walk data_path and index all .info.json files by video ID.
+
+    Returns (video_index, stem_index). video_index maps video_id → absolute
+    path to the .info.json. stem_index maps the info.json filename stem
+    (filename minus ".info.json") → video_id, used as a last-resort fallback
+    in the match endpoint for video files whose names contain no embedded ID.
+    """
     index: dict[str, str] = {}
+    stem_index: dict[str, str] = {}
 
     def onerror(err: OSError) -> None:
         logger.warning("Index walk error at '%s' (errno %d) — skipping: %s", err.filename, err.errno, err)
@@ -62,15 +70,21 @@ def build_index(data_path: str) -> dict[str, str]:
         for f in files:
             if not f.endswith(".info.json"):
                 continue
-            video_id = extract_video_id(f)
-            if video_id:
-                index[video_id] = os.path.join(root, f)
+            # Try the filename first (yt-dlp default: "Title [VIDEO_ID].info.json").
+            # Fall back to the containing directory name, which covers MeTube's
+            # per-video folder layout: "Channel/Title [VIDEO_ID]/Title.info.json".
+            video_id = extract_video_id(f) or extract_video_id(os.path.basename(root))
+            if not video_id:
+                continue
+            path = os.path.join(root, f)
+            index[video_id] = path
+            stem_index[f.removesuffix(".info.json")] = video_id
 
     if not index:
         logger.warning("Index is empty — no .info.json files found under %s", data_path)
     else:
         logger.info("Indexed %d videos from %s", len(index), data_path)
-    return index
+    return index, stem_index
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
@@ -78,14 +92,14 @@ def build_index(data_path: str) -> dict[str, str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _video_index
+    global _video_index, _stem_index
     if not os.path.isdir(DATA_PATH):
         logger.error(
             "YOUTUBE_DATA_PATH '%s' does not exist or is not a directory. Refusing to start.",
             DATA_PATH,
         )
         raise RuntimeError(f"YOUTUBE_DATA_PATH '{DATA_PATH}' is not a directory")
-    _video_index = build_index(DATA_PATH)
+    _video_index, _stem_index = build_index(DATA_PATH)
     yield
 
 
@@ -102,11 +116,11 @@ def _get_info_json(video_id: str) -> dict:
     (rate-limited to once per 60 s) before retrying. Raises HTTP 404 if
     still not found after rebuild, or HTTP 500 on read/parse failure.
     """
-    global _video_index, _last_rebuild
+    global _video_index, _stem_index, _last_rebuild
     path = _video_index.get(video_id)
     if not path:
         if time.monotonic() - _last_rebuild > _REBUILD_COOLDOWN:
-            _video_index = build_index(DATA_PATH)
+            _video_index, _stem_index = build_index(DATA_PATH)
             _last_rebuild = time.monotonic()
         path = _video_index.get(video_id)
     if not path:
@@ -182,7 +196,14 @@ async def match(request: Request):
     body = await request.json()
     filename = body.get("filename", "")
 
+    # Try the filename itself, then the immediate parent directory name
+    # (covers MeTube's "Title [ID]/Title.ext" per-video folder layout),
+    # then fall back to the stem index for bare filenames with no ID anywhere.
     video_id = extract_video_id(filename)
+    if not video_id:
+        video_id = extract_video_id(Path(filename).parent.name)
+    if not video_id:
+        video_id = _stem_index.get(Path(filename).stem)
     if not video_id:
         safe_filename = "".join(c for c in filename[:256] if c >= " ")
         logger.warning("Could not extract video ID from filename: %s", safe_filename)
@@ -501,8 +522,8 @@ async def api_rescan():
 @app.post("/api/index/rebuild", dependencies=[Depends(_require_api_key)])
 async def api_rebuild_index():
     """Force a rebuild of the in-memory video index."""
-    global _video_index
-    _video_index = build_index(DATA_PATH)
+    global _video_index, _stem_index
+    _video_index, _stem_index = build_index(DATA_PATH)
     if not _video_index:
         logger.warning("Rebuilt index is empty — no videos found under %s", DATA_PATH)
     return {"indexed": len(_video_index)}

@@ -37,9 +37,49 @@ def tmp_data(tmp_path):
 def patched_app(tmp_data, monkeypatch):
     tmp_path, info = tmp_data
     index = {info["id"]: str(tmp_path / f"{info['id']}.info.json")}
+    stem_index = {info["id"]: info["id"]}  # stem of "{id}.info.json" is "{id}"
     monkeypatch.setattr(yamp_app, "_video_index", index)
+    monkeypatch.setattr(yamp_app, "_stem_index", stem_index)
     monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
     return index, info, tmp_path
+
+
+# ── build_index ───────────────────────────────────────────────────────────────
+
+
+def test_build_index_parent_dir_pattern(tmp_path):
+    """ID in the containing directory is indexed when the filename has no ID."""
+    from app import build_index
+
+    video_id = "DNh1Ynj5ILU"
+    # MeTube layout: Channel [CHANNEL_ID]/Title [VIDEO_ID]/Title.info.json
+    video_dir = tmp_path / "Two_Another [UCvtf-i26Ecd]" / f"Live at KOKO [{video_id}]"
+    video_dir.mkdir(parents=True)
+    info_file = video_dir / "Live at KOKO.info.json"
+    info_file.write_text(json.dumps({"id": video_id, "title": "Live at KOKO"}), encoding="utf-8")
+
+    index, stem_index = build_index(str(tmp_path))
+
+    assert video_id in index
+    assert index[video_id] == str(info_file)
+    assert stem_index.get("Live at KOKO") == video_id
+
+
+def test_build_index_filename_id_takes_priority(tmp_path):
+    """When both filename and parent directory have IDs, the filename ID wins."""
+    from app import build_index
+
+    file_id = "fileIDabcde"   # 11 chars
+    dir_id  = "dirIDvwxyz1"   # 11 chars
+    video_dir = tmp_path / f"Video [{dir_id}]"
+    video_dir.mkdir()
+    info_file = video_dir / f"Video [{file_id}].info.json"
+    info_file.write_text(json.dumps({"id": file_id, "title": "Video"}), encoding="utf-8")
+
+    index, _ = build_index(str(tmp_path))
+
+    assert file_id in index
+    assert dir_id not in index
 
 
 # ── /api/thumbnail/{video_id} ─────────────────────────────────────────────────
@@ -357,6 +397,31 @@ async def test_match_unknown_video_id(patched_app):
         )
     assert resp.status_code == 200
     assert resp.json()["MediaContainer"]["Metadata"] == []
+
+
+async def test_match_parent_dir_fallback(patched_app):
+    """ID in parent directory name (MeTube per-video folder) → match found."""
+    _, info, _ = patched_app
+    # Plex sends the relative path; the containing folder has the video ID
+    filename = f"Channel/Video Title [{info['id']}]/Video Title.mp4"
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/movies/library/metadata/matches", json={"filename": filename})
+    assert resp.status_code == 200
+    results = resp.json()["MediaContainer"]["Metadata"]
+    assert len(results) == 1
+    assert results[0]["ratingKey"] == f"youtube-{info['id']}"
+
+
+async def test_match_stem_index_fallback(patched_app, monkeypatch):
+    """Bare filename with no ID anywhere → stem index resolves to correct video."""
+    _, info, _ = patched_app
+    monkeypatch.setattr(yamp_app, "_stem_index", {"My Bare Title": info["id"]})
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/movies/library/metadata/matches", json={"filename": "My Bare Title.mp4"})
+    assert resp.status_code == 200
+    results = resp.json()["MediaContainer"]["Metadata"]
+    assert len(results) == 1
+    assert results[0]["ratingKey"] == f"youtube-{info['id']}"
 
 
 async def test_get_metadata_happy_path(patched_app):

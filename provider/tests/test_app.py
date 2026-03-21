@@ -163,7 +163,7 @@ async def test_api_videos_basic(patched_app):
     videos = resp.json()["videos"]
     assert len(videos) >= 1
     v = videos[0]
-    for key in ("id", "title", "channel", "thumbnail", "upload_date", "collections", "matched"):
+    for key in ("id", "title", "channel", "thumbnail", "upload_date", "collections", "matched", "tags"):
         assert key in v
     assert v["upload_date"] == "2023-10-15"
     assert isinstance(v["matched"], bool)
@@ -180,9 +180,11 @@ async def test_api_videos_corrupt_file(patched_app):
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/videos")
     assert resp.status_code == 200
-    ids = [v["id"] for v in resp.json()["videos"]]
+    data = resp.json()
+    ids = [v["id"] for v in data["videos"]]
     assert info["id"] in ids
     assert "bad_id" not in ids
+    assert "bad_id" in data.get("skipped_videos", [])
 
 
 async def test_api_videos_no_map(patched_app):
@@ -200,6 +202,90 @@ async def test_api_videos_no_map(patched_app):
     assert any(v["id"] == info["id"] for v in videos)
     for v in videos:
         assert v["matched"] is False
+
+
+async def test_api_videos_collections_error_flag(patched_app):
+    """Corrupt collection map → videos returned with collections_error flag."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text("{{bad json}}", encoding="utf-8")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/videos")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data.get("collections_error") is True
+    assert "videos" in data
+
+
+async def test_api_videos_thumbnail_proxy_url(patched_app, monkeypatch):
+    """With YAMP_URL set and local thumbnail, thumbnail uses proxy URL."""
+    _, info, _ = patched_app
+    monkeypatch.setattr(yamp_app, "YAMP_URL", "http://yamp.local:8765")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/videos")
+    assert resp.status_code == 200
+    v = next(vid for vid in resp.json()["videos"] if vid["id"] == info["id"])
+    assert v["thumbnail"] == f"http://yamp.local:8765/api/thumbnail/{info['id']}"
+
+
+async def test_api_videos_thumbnail_relative_url(patched_app, monkeypatch):
+    """With local thumbnail but no YAMP_URL, thumbnail is a relative URL."""
+    _, info, _ = patched_app
+    monkeypatch.setattr(yamp_app, "YAMP_URL", "")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/videos")
+    assert resp.status_code == 200
+    v = next(vid for vid in resp.json()["videos"] if vid["id"] == info["id"])
+    assert v["thumbnail"] == f"/api/thumbnail/{info['id']}"
+
+
+# ── /api/collections (GET) ────────────────────────────────────────────────────
+
+
+async def test_api_get_collections_no_map(patched_app):
+    """No _collection_map.json → empty collections with zero counts."""
+    _, _, tmp_path = patched_app
+    map_file = tmp_path / "_collection_map.json"
+    if map_file.exists():
+        map_file.unlink()
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/collections")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["collections"] == []
+    assert data["matched_count"] == 0
+    assert data["unmatched_count"] == 0
+
+
+async def test_api_get_collections_happy_path(patched_app):
+    """Map exists → returns collections, counts, and unmatched_tags."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text(
+        json.dumps({
+            "collections": [{"name": "Alt-J", "rules": []}],
+            "matched_ids": ["a", "b"],
+            "unmatched_ids": ["c"],
+            "unmatched_tags": {"jazz": 3},
+        }),
+        encoding="utf-8",
+    )
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/collections")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["collections"]) == 1
+    assert data["matched_count"] == 2
+    assert data["unmatched_count"] == 1
+    assert data["unmatched_tags"] == {"jazz": 3}
+
+
+async def test_api_get_collections_corrupt_map(patched_app):
+    """Corrupt map file → HTTP 500."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text("{{bad json}}", encoding="utf-8")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/collections")
+    assert resp.status_code == 500
+    assert "Could not read collection map" in resp.json()["detail"]
 
 
 # ── /api/plex/sections ────────────────────────────────────────────────────────
@@ -287,6 +373,81 @@ async def test_plex_sections_bad_json(monkeypatch):
 # ── PUT /api/collections ─────────────────────────────────────────────────────
 
 
+async def test_api_put_collections_no_map(patched_app):
+    """No _collection_map.json → 404."""
+    _, _, tmp_path = patched_app
+    map_file = tmp_path / "_collection_map.json"
+    if map_file.exists():
+        map_file.unlink()
+    body = {"collections": []}
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json=body)
+    assert resp.status_code == 404
+
+
+async def test_api_put_collections_duplicate_names(patched_app):
+    """Duplicate collection names → 422 validation error."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    body = {"collections": [
+        {"name": "Dup", "rules": []},
+        {"name": "Dup", "rules": []},
+    ]}
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json=body)
+    assert resp.status_code == 422
+
+
+async def test_api_key_no_token_gets_403(patched_app, monkeypatch):
+    """When API_KEY is set, request without Authorization header gets 403."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "API_KEY", "supersecret")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": []})
+    assert resp.status_code == 403
+
+
+async def test_api_key_wrong_token_gets_403(patched_app, monkeypatch):
+    """When API_KEY is set, wrong token gets 403."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "API_KEY", "supersecret")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put(
+            "/api/collections",
+            json={"collections": []},
+            headers={"Authorization": "Bearer wrongtoken"},
+        )
+    assert resp.status_code == 403
+
+
+async def test_api_key_correct_token_accepted(patched_app, monkeypatch):
+    """When API_KEY is set, correct Bearer token is accepted."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "API_KEY", "supersecret")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put(
+            "/api/collections",
+            json={"collections": []},
+            headers={"Authorization": "Bearer supersecret"},
+        )
+    assert resp.status_code == 200
+
+
 async def test_api_put_collections_recompute_failure(patched_app, monkeypatch):
     """Collections are saved but recompute raises → HTTP 500 with descriptive message."""
     _, _, tmp_path = patched_app
@@ -321,7 +482,7 @@ async def test_api_rescan_happy_path(monkeypatch):
         with patch("httpx.AsyncClient", return_value=mock_client):
             resp = await client.post("/api/rescan")
     assert resp.status_code == 200
-    assert resp.json() == {"triggered_sections": ["1"]}
+    assert resp.json() == {"triggered_sections": ["1"], "failed_sections": []}
 
 
 async def test_api_rescan_no_yamp_sections(monkeypatch):
@@ -334,7 +495,7 @@ async def test_api_rescan_no_yamp_sections(monkeypatch):
         with patch("httpx.AsyncClient", return_value=mock_client):
             resp = await client.post("/api/rescan")
     assert resp.status_code == 200
-    assert resp.json() == {"triggered_sections": []}
+    assert resp.json() == {"triggered_sections": [], "failed_sections": []}
 
 
 async def test_api_rescan_per_section_timeout(monkeypatch):
@@ -347,7 +508,9 @@ async def test_api_rescan_per_section_timeout(monkeypatch):
         with patch("httpx.AsyncClient", return_value=mock_client):
             resp = await client.post("/api/rescan")
     assert resp.status_code == 200
-    assert resp.json() == {"triggered_sections": []}
+    data = resp.json()
+    assert data["triggered_sections"] == []
+    assert data["failed_sections"] == [{"section_id": "1", "error": "timeout"}]
 
 
 async def test_api_rescan_non_numeric_key(monkeypatch):
@@ -360,7 +523,29 @@ async def test_api_rescan_non_numeric_key(monkeypatch):
         with patch("httpx.AsyncClient", return_value=mock_client):
             resp = await client.post("/api/rescan")
     assert resp.status_code == 200
-    assert resp.json() == {"triggered_sections": []}
+    assert resp.json() == {"triggered_sections": [], "failed_sections": []}
+
+
+async def test_api_rescan_no_plex_config(monkeypatch):
+    """Missing PLEX_URL/PLEX_TOKEN → 400."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/rescan")
+    assert resp.status_code == 400
+
+
+# ── POST /api/index/rebuild ───────────────────────────────────────────────────
+
+
+async def test_api_rebuild_index(patched_app):
+    """Rebuild index returns indexed count."""
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/index/rebuild")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "indexed" in data
+    assert isinstance(data["indexed"], int)
 
 
 # ── Plex provider endpoints ───────────────────────────────────────────────────
@@ -376,6 +561,7 @@ async def test_match_happy_path(patched_app):
     results = resp.json()["MediaContainer"]["Metadata"]
     assert len(results) == 1
     assert results[0]["ratingKey"] == info["id"]
+    assert results[0]["key"] == f"/library/metadata/{info['id']}"
     assert results[0]["type"] == "movie"
     assert results[0]["title"] == info["title"]
 
@@ -424,6 +610,40 @@ async def test_match_stem_index_fallback(patched_app, monkeypatch):
     assert results[0]["ratingKey"] == info["id"]
 
 
+async def test_match_missing_title(patched_app):
+    """info_json missing title → 200 with empty Metadata list."""
+    _, info, tmp_path = patched_app
+    info_no_title = {k: v for k, v in info.items() if k != "title"}
+    (tmp_path / f"{info['id']}.info.json").write_text(json.dumps(info_no_title), encoding="utf-8")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/movies/library/metadata/matches", json={"filename": f"Video [{info['id']}].mp4"})
+    assert resp.status_code == 200
+    assert resp.json()["MediaContainer"]["Metadata"] == []
+
+
+async def test_match_missing_upload_date(patched_app):
+    """info_json missing upload_date → 200 with empty Metadata list."""
+    _, info, tmp_path = patched_app
+    info_no_date = {k: v for k, v in info.items() if k != "upload_date"}
+    (tmp_path / f"{info['id']}.info.json").write_text(json.dumps(info_no_date), encoding="utf-8")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/movies/library/metadata/matches", json={"filename": f"Video [{info['id']}].mp4"})
+    assert resp.status_code == 200
+    assert resp.json()["MediaContainer"]["Metadata"] == []
+
+
+async def test_match_unparseable_upload_date(patched_app):
+    """info_json with bad upload_date → 200 with empty Metadata list."""
+    _, info, tmp_path = patched_app
+    (tmp_path / f"{info['id']}.info.json").write_text(
+        json.dumps({**info, "upload_date": "not-a-date"}), encoding="utf-8"
+    )
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/movies/library/metadata/matches", json={"filename": f"Video [{info['id']}].mp4"})
+    assert resp.status_code == 200
+    assert resp.json()["MediaContainer"]["Metadata"] == []
+
+
 async def test_get_metadata_happy_path(patched_app):
     """Valid video ID returns full metadata with correct title and year."""
     _, info, _ = patched_app
@@ -469,3 +689,126 @@ async def test_get_metadata_resolve_collections_failure(patched_app, monkeypatch
     meta = resp.json()["MediaContainer"]["Metadata"][0]
     assert meta["title"] == info["title"]
     assert meta.get("Collection", []) == []
+
+
+async def test_get_metadata_resolve_collections_value_error(patched_app, monkeypatch):
+    """If resolve_collections raises ValueError, endpoint still returns 200 with empty collections."""
+    _, info, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+
+    def _fail(*_args):
+        raise ValueError("corrupt data")
+
+    monkeypatch.setattr(yamp_app, "resolve_collections", _fail)
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/movies/library/metadata/{info['id']}")
+    assert resp.status_code == 200
+    meta = resp.json()["MediaContainer"]["Metadata"][0]
+    assert meta.get("Collection", []) == []
+
+
+async def test_get_metadata_build_response_failure(patched_app, monkeypatch):
+    """If build_metadata_response raises ValueError → HTTP 500."""
+    _, info, _ = patched_app
+
+    def _fail(*_args, **_kwargs):
+        raise ValueError("missing required field")
+
+    monkeypatch.setattr(yamp_app, "build_metadata_response", _fail)
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/movies/library/metadata/{info['id']}")
+    assert resp.status_code == 500
+
+
+async def test_get_metadata_youtube_prefix_returns_404(patched_app):
+    """Plex uses bare video ID — the youtube-{id} prefixed format should 404."""
+    _, info, _ = patched_app
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/movies/library/metadata/youtube-{info['id']}")
+    assert resp.status_code == 404
+
+
+# ── GET /movies (provider discovery) ─────────────────────────────────────────
+
+
+async def test_get_provider_feature_keys():
+    """Feature keys must be relative paths (no /movies prefix) to avoid Plex doubling them."""
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/movies")
+    assert resp.status_code == 200
+    features = {f["type"]: f["key"] for f in resp.json()["MediaProvider"]["Feature"]}
+    assert features["match"] == "/library/metadata/matches"
+    assert features["metadata"] == "/library/metadata"
+
+
+# ── /movies/library/metadata/{rating_key}/images ─────────────────────────────
+
+
+async def test_get_images_invalid_id(patched_app):
+    """Non-video-ID format → 404."""
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/movies/library/metadata/not-an-id/images")
+    assert resp.status_code == 404
+
+
+async def test_get_images_unknown_id(patched_app):
+    """Valid ID format but not in index → 404."""
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/movies/library/metadata/aaaaaaaaaaa/images")
+    assert resp.status_code == 404
+
+
+async def test_get_images_local_thumb_with_yamp_url(patched_app, monkeypatch):
+    """Local thumbnail + YAMP_URL set → coverPoster uses YAMP proxy URL."""
+    _, info, _ = patched_app
+    monkeypatch.setattr(yamp_app, "YAMP_URL", "http://yamp.local:8765")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/movies/library/metadata/{info['id']}/images")
+    assert resp.status_code == 200
+    images = resp.json()["MediaContainer"]["Image"]
+    assert len(images) == 1
+    assert images[0]["type"] == "coverPoster"
+    assert images[0]["url"] == f"http://yamp.local:8765/api/thumbnail/{info['id']}"
+
+
+async def test_get_images_local_thumb_without_yamp_url(patched_app, monkeypatch):
+    """Local thumbnail but no YAMP_URL → falls back to remote thumbnail from info_json."""
+    _, info, _ = patched_app
+    monkeypatch.setattr(yamp_app, "YAMP_URL", "")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/movies/library/metadata/{info['id']}/images")
+    assert resp.status_code == 200
+    images = resp.json()["MediaContainer"]["Image"]
+    assert len(images) == 1
+    assert images[0]["type"] == "coverPoster"
+    assert images[0]["url"] == info["thumbnail"]
+
+
+async def test_get_images_no_local_thumb_remote_fallback(patched_app, monkeypatch):
+    """No local thumbnail → falls back to remote thumbnail URL from info_json."""
+    _, info, tmp_path = patched_app
+    (tmp_path / f"{info['id']}.jpg").unlink()
+    monkeypatch.setattr(yamp_app, "YAMP_URL", "")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/movies/library/metadata/{info['id']}/images")
+    assert resp.status_code == 200
+    images = resp.json()["MediaContainer"]["Image"]
+    assert len(images) == 1
+    assert images[0]["url"] == info["thumbnail"]
+
+
+async def test_get_images_no_thumbnail_at_all(patched_app):
+    """No local file and no thumbnail field → empty Image list."""
+    _, info, tmp_path = patched_app
+    (tmp_path / f"{info['id']}.jpg").unlink()
+    info_no_thumb = {k: v for k, v in info.items() if k != "thumbnail"}
+    (tmp_path / f"{info['id']}.info.json").write_text(json.dumps(info_no_thumb), encoding="utf-8")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/movies/library/metadata/{info['id']}/images")
+    assert resp.status_code == 200
+    assert resp.json()["MediaContainer"]["Image"] == []

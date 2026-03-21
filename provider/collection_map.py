@@ -57,8 +57,8 @@ def save_map(mapping_path: str, data: dict) -> None:
         # Clean up temp file if it was created
         try:
             os.unlink(tmp_path)
-        except OSError:
-            pass
+        except OSError as unlink_err:
+            logger.warning("save_map: failed to clean up temp file '%s': %s", tmp_path, unlink_err)
         raise
 
 
@@ -97,7 +97,10 @@ def match_video(info_json: dict, collections: list[dict]) -> tuple[list[str], se
                 continue
 
             if field_name == "tags":
-                matched = tags & rule_values
+                if match_type == "exact":
+                    matched = tags & rule_values
+                else:  # "in" — substring match against tags
+                    matched = {t for t in tags if any(rv in t for rv in rule_values)}
                 if matched:
                     collection_matches.append(c_name)
                     tags -= matched
@@ -126,6 +129,7 @@ def recompute_all_collections(video_index: dict[str, str], mapping_path: str) ->
         matched_ids: list[str] = []
         unmatched_ids: list[str] = []
         unmatched_tags: dict[str, int] = {}
+        skipped = 0
 
         for video_id, path in video_index.items():
             try:
@@ -133,6 +137,7 @@ def recompute_all_collections(video_index: dict[str, str], mapping_path: str) ->
                     info_json = json.load(f)
             except (OSError, json.JSONDecodeError) as e:
                 logger.warning("recompute: skipping %s: %s", video_id, e)
+                skipped += 1
                 continue
 
             c_matches, _ = match_video(info_json, collections)
@@ -151,8 +156,10 @@ def recompute_all_collections(video_index: dict[str, str], mapping_path: str) ->
         )
 
         save_map(mapping_path, mapping_data)
-        logger.info("recompute_all_collections: %d matched, %d unmatched", len(matched_ids), len(unmatched_ids))
-        return {"matched": len(matched_ids), "unmatched": len(unmatched_ids)}
+        if skipped:
+            logger.error("recompute_all_collections: %d video(s) skipped due to read/parse errors", skipped)
+        logger.info("recompute_all_collections: %d matched, %d unmatched, %d skipped", len(matched_ids), len(unmatched_ids), skipped)
+        return {"matched": len(matched_ids), "unmatched": len(unmatched_ids), "skipped": skipped}
 
 
 def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
@@ -167,7 +174,9 @@ def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
         v_id = info_json.get("id", "")
         mapping_data = load_map(mapping_path)
 
-        already_matched = v_id in mapping_data.get("matched_ids", [])
+        matched_set = set(mapping_data.get("matched_ids", []))
+        unmatched_set = set(mapping_data.get("unmatched_ids", []))
+        already_tracked = v_id in matched_set or v_id in unmatched_set
 
         # Always compute collections so Plex gets the right data on every fetch;
         # state updates (file writes) are skipped for already-tracked videos.
@@ -178,29 +187,32 @@ def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
             v_id, c_matches, remaining_tags,
         )
 
-        # Only update state if this is a new video (not yet tracked)
-        if not already_matched:
+        # Only update state if this is a new video (not yet tracked in either list)
+        if not already_tracked:
             fresh_append = False
 
             if c_matches:
-                if v_id in mapping_data.get("unmatched_ids", []):
+                if v_id in unmatched_set:
                     mapping_data["unmatched_ids"].remove(v_id)
                 matched_ids = mapping_data.setdefault("matched_ids", [])
-                if v_id not in matched_ids:
+                if v_id not in matched_set:
                     matched_ids.append(v_id)
                     fresh_append = True
-            elif v_id not in mapping_data.get("unmatched_ids", []):
+            elif v_id not in unmatched_set:
                 mapping_data.setdefault("unmatched_ids", []).append(v_id)
                 fresh_append = True
 
-            # Track unused tags from newly-seen unmatched videos to surface collection patterns
-            if fresh_append and remaining_tags:
+            # Track unused tags only for newly-seen unmatched videos to surface collection patterns
+            if fresh_append and not c_matches and remaining_tags:
                 unmatched_tags: dict[str, int] = mapping_data.setdefault("unmatched_tags", {})
                 for tag in remaining_tags:
                     try:
                         current = int(unmatched_tags.get(tag, 0))
                     except (ValueError, TypeError):
-                        logger.warning("Non-numeric count for tag %r in unmatched_tags — treating as 0", tag)
+                        logger.warning(
+                            "Non-numeric count for tag %r in unmatched_tags (got %r) — treating as 0",
+                            tag, unmatched_tags.get(tag),
+                        )
                         current = 0
                     unmatched_tags[tag] = current + 1
                 mapping_data["unmatched_tags"] = dict(

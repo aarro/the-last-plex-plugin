@@ -39,7 +39,8 @@ export default function App() {
         body: JSON.stringify({ collections: data.collections }),
       });
       if (!res.ok) throw new Error(await res.text());
-      const result = await res.json();
+      let result;
+      try { result = await res.json(); } catch { throw new Error("Server returned invalid response"); }
       setStatus({ type: "ok", msg: `Saved — ${result.matched} matched, ${result.unmatched} unmatched.` });
       await load();
     } catch (e) {
@@ -55,9 +56,14 @@ export default function App() {
     try {
       const res = await fetch(`${API}/api/rescan`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
-      const json = await res.json();
+      let json;
+      try { json = await res.json(); } catch { throw new Error("Server returned invalid response"); }
       const n = json.triggered_sections?.length ?? 0;
-      setStatus({ type: n > 0 ? "ok" : "err", msg: n > 0 ? "Plex rescan triggered." : "Rescan failed — no YAMP-managed library found in Plex." });
+      if (n > 0) {
+        setStatus({ type: "ok", msg: "Plex rescan triggered." });
+      } else {
+        setStatus({ type: "err", msg: "Rescan failed — no YAMP-managed library found in Plex." });
+      }
     } catch (e) {
       setStatus({ type: "err", msg: `Rescan failed: ${e.message}` });
     } finally {

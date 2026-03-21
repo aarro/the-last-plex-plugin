@@ -16,7 +16,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from collection_map import match_video, find_collection_map, load_map, recompute_all_collections, resolve_collections, save_map
 from metadata import (
@@ -108,7 +108,7 @@ app = FastAPI(title="YAMP", lifespan=lifespan)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _get_info_json(video_id: str) -> dict:
+async def _get_info_json(video_id: str) -> dict:
     """
     Load info_json for a video.
 
@@ -120,10 +120,11 @@ def _get_info_json(video_id: str) -> dict:
     path = _video_index.get(video_id)
     if not path:
         if time.monotonic() - _last_rebuild > _REBUILD_COOLDOWN:
-            _video_index, _stem_index = build_index(DATA_PATH)
+            _video_index, _stem_index = await asyncio.to_thread(build_index, DATA_PATH)
             _last_rebuild = time.monotonic()
         path = _video_index.get(video_id)
     if not path:
+        logger.warning("Video '%s' not found in index (after rebuild)", video_id)
         raise HTTPException(status_code=404, detail=f"Video '{video_id}' not found")
     try:
         with open(path, encoding="utf-8") as f:
@@ -210,22 +211,29 @@ async def match(request: Request):
         return JSONResponse(_media_container([]))
 
     try:
-        info_json = _get_info_json(video_id)
+        info_json = await _get_info_json(video_id)
     except HTTPException as exc:
         if exc.status_code == 404:
             logger.warning("No info_json found for video ID: %s", video_id)
-        else:
-            logger.error("Failed to load info_json for video ID '%s': %s", video_id, exc.detail)
+            return JSONResponse(_media_container([]))
+        logger.error("Failed to load info_json for video ID '%s': %s", video_id, exc.detail)
+        raise
+
+    title = info_json.get("title")
+    if not title:
+        logger.error("Missing title in info_json for video ID: %s (file corrupt?)", video_id)
         return JSONResponse(_media_container([]))
 
     upload_date_raw = info_json.get("upload_date")
-    title = info_json.get("title")
-
-    if not upload_date_raw or not title:
-        logger.warning("Missing upload_date or title in info_json for video ID: %s", video_id)
+    if not upload_date_raw:
+        logger.error("Missing upload_date in info_json for video ID: %s (file corrupt?)", video_id)
         return JSONResponse(_media_container([]))
 
-    upload_date = parse_upload_date(upload_date_raw)
+    try:
+        upload_date = parse_upload_date(upload_date_raw)
+    except ValueError:
+        logger.warning("Unparseable upload_date %r for video ID: %s", upload_date_raw, video_id)
+        return JSONResponse(_media_container([]))
 
     return JSONResponse(
         _media_container([
@@ -277,9 +285,10 @@ async def get_images(rating_key: str):
     """Images endpoint — return poster/backdrop URLs for a video."""
     video_id = rating_key
     if not _validate_video_id(video_id):
+        logger.warning("get_images: invalid video ID format: %r", video_id)
         raise HTTPException(status_code=404)
 
-    info_json = _get_info_json(video_id)
+    info_json = await _get_info_json(video_id)
     images = []
 
     # Prefer local thumbnail served via YAMP (Plex can't always fetch remote URLs)
@@ -303,23 +312,33 @@ async def get_metadata(rating_key: str):
     """Full metadata endpoint — called after a successful match."""
     video_id = rating_key
     if not _validate_video_id(video_id):
+        logger.warning("get_metadata: invalid video ID format: %r", video_id)
         raise HTTPException(status_code=404)
 
-    info_json = _get_info_json(video_id)
+    info_json = await _get_info_json(video_id)
 
     mapping_path = _collection_map_path()
     collections: list[str] = []
     if mapping_path:
         try:
             collections = await asyncio.to_thread(resolve_collections, info_json, mapping_path)
-        except (OSError, ValueError) as e:
+        except OSError as e:
             logger.error(
-                "resolve_collections failed for '%s' (collection state may not be persisted): %s",
+                "resolve_collections failed for '%s' (I/O error, collection state not persisted): %s",
+                video_id, e,
+            )
+        except ValueError as e:
+            logger.error(
+                "resolve_collections failed for '%s' (invalid data in collection map): %s",
                 video_id, e,
             )
     logger.info("get_metadata: '%s' → collections=%s", video_id, collections)
 
-    meta = build_metadata_response(info_json, collections, rating_key, IDENTIFIER, METADATA_KEY)
+    try:
+        meta = build_metadata_response(info_json, collections, rating_key, IDENTIFIER, METADATA_KEY)
+    except ValueError as e:
+        logger.error("build_metadata_response failed for '%s': %s", video_id, e)
+        raise HTTPException(status_code=500, detail=f"Failed to build metadata for '{video_id}'") from e
     return JSONResponse(_media_container([meta]))
 
 
@@ -339,6 +358,14 @@ class CollectionModel(BaseModel):
 
 class CollectionsBody(BaseModel):
     collections: List[CollectionModel]
+
+    @field_validator("collections")
+    @classmethod
+    def names_are_unique(cls, v: List[CollectionModel]) -> List[CollectionModel]:
+        names = [c.name for c in v]
+        if len(names) != len(set(names)):
+            raise ValueError("Collection names must be unique")
+        return v
 
 
 @app.get("/api/collections")
@@ -384,19 +411,25 @@ async def api_put_collections(body: CollectionsBody):
         stats = await asyncio.to_thread(recompute_all_collections, _video_index, mapping_path)
     except (OSError, ValueError) as e:
         logger.error("api_put_collections: recompute failed: %s", e)
-        raise HTTPException(status_code=500, detail="Collections saved but recompute failed — restart to retry")
+        raise HTTPException(status_code=500, detail="Collections saved but recompute failed — trigger a rescan to retry")
     return {"ok": True, **stats}
 
 
-def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> list[dict]:
-    """Synchronous helper: build the video list from the index. Run via asyncio.to_thread."""
+def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> tuple[list[dict], list[str]]:
+    """Synchronous helper: build the video list from the index. Run via asyncio.to_thread.
+
+    Returns (videos, skipped_ids) where skipped_ids contains video IDs that could
+    not be read or parsed.
+    """
     videos = []
+    skipped_ids = []
     for video_id, path in video_index.items():
         try:
             with open(path, encoding="utf-8") as f:
                 info_json = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             logger.warning("api_videos: skipping %s: %s", video_id, e)
+            skipped_ids.append(video_id)
             continue
 
         thumb_path = _local_thumb_path(video_id)
@@ -413,6 +446,7 @@ def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> l
         try:
             upload_date = parse_upload_date(upload_date_raw).isoformat() if upload_date_raw else ""
         except ValueError:
+            logger.warning("api_videos: unparseable upload_date %r for %s — omitting date", upload_date_raw, video_id)
             upload_date = ""
 
         videos.append({
@@ -427,7 +461,7 @@ def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> l
         })
 
     videos.sort(key=lambda v: v["upload_date"], reverse=True)
-    return videos
+    return videos, skipped_ids
 
 
 @app.get("/api/videos")
@@ -435,14 +469,41 @@ async def api_videos():
     """Return all indexed videos with metadata and matched collections."""
     mapping_path = _collection_map_path()
     collections: list[dict] = []
+    collections_error = False
     if mapping_path:
         try:
             collections = load_map(mapping_path).get("collections", [])
         except (OSError, ValueError) as e:
             logger.error("api_videos: failed to load collection map at '%s': %s", mapping_path, e)
+            collections_error = True
 
-    videos = await asyncio.to_thread(_build_video_list, _video_index, collections)
-    return {"videos": videos}
+    videos, skipped_ids = await asyncio.to_thread(_build_video_list, _video_index, collections)
+    result: dict = {"videos": videos}
+    if collections_error:
+        result["collections_error"] = True
+    if skipped_ids:
+        result["skipped_videos"] = skipped_ids
+    return result
+
+
+async def _fetch_plex_sections(client: httpx.AsyncClient) -> list[dict]:
+    """Fetch Plex library sections. Raises HTTPException on any failure."""
+    plex_headers = {"X-Plex-Token": PLEX_TOKEN, "Accept": "application/json"}
+    try:
+        resp = await client.get(f"{PLEX_URL}/library/sections", headers=plex_headers)
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Plex server timed out")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Plex returned {e.response.status_code}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Could not reach Plex: {e}")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        raise HTTPException(status_code=502, detail="Plex returned unexpected response format")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Plex returned unexpected response format")
+    return data.get("MediaContainer", {}).get("Directory", [])
 
 
 @app.get("/api/plex/sections")
@@ -450,20 +511,8 @@ async def api_plex_sections():
     """Diagnostic: return all Plex library sections and their configured agents."""
     if not PLEX_URL or not PLEX_TOKEN:
         raise HTTPException(status_code=400, detail="PLEX_URL and PLEX_TOKEN env vars not set")
-    plex_headers = {"X-Plex-Token": PLEX_TOKEN, "Accept": "application/json"}
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-        try:
-            resp = await client.get(f"{PLEX_URL}/library/sections", headers=plex_headers)
-            resp.raise_for_status()
-            sections = resp.json().get("MediaContainer", {}).get("Directory", [])
-        except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail="Plex server timed out")
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=f"Plex returned {e.response.status_code}")
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=503, detail=f"Could not reach Plex: {e}")
-        except (json.JSONDecodeError, KeyError):
-            raise HTTPException(status_code=502, detail="Plex returned unexpected response format")
+        sections = await _fetch_plex_sections(client)
     return {"sections": sections}
 
 
@@ -475,23 +524,10 @@ async def api_rescan():
 
     plex_headers = {"X-Plex-Token": PLEX_TOKEN, "Accept": "application/json"}
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-        try:
-            sections_resp = await client.get(
-                f"{PLEX_URL}/library/sections",
-                headers=plex_headers,
-            )
-            sections_resp.raise_for_status()
-            sections = sections_resp.json().get("MediaContainer", {}).get("Directory", [])
-        except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail="Plex server timed out")
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=502, detail=f"Plex returned {e.response.status_code}")
-        except httpx.RequestError as e:
-            raise HTTPException(status_code=503, detail=f"Could not reach Plex: {e}")
-        except (json.JSONDecodeError, KeyError):
-            raise HTTPException(status_code=502, detail="Plex returned unexpected response format")
+        sections = await _fetch_plex_sections(client)
 
         triggered = []
+        failed = []
         for section in sections:
             if section.get("agent") == IDENTIFIER:
                 section_id = section["key"]
@@ -508,19 +544,22 @@ async def api_rescan():
                     triggered.append(section_id)
                 except httpx.TimeoutException:
                     logger.error("Timed out refreshing section %s", section_id)
+                    failed.append({"section_id": section_id, "error": "timeout"})
                 except httpx.HTTPStatusError as e:
                     logger.error("Failed to refresh section %s: HTTP %s", section_id, e.response.status_code)
+                    failed.append({"section_id": section_id, "error": f"HTTP {e.response.status_code}"})
                 except httpx.RequestError as e:
                     logger.error("Network error refreshing section %s: %s", section_id, e)
+                    failed.append({"section_id": section_id, "error": str(e)})
 
-    return {"triggered_sections": triggered}
+    return {"triggered_sections": triggered, "failed_sections": failed}
 
 
 @app.post("/api/index/rebuild", dependencies=[Depends(_require_api_key)])
 async def api_rebuild_index():
     """Force a rebuild of the in-memory video index."""
     global _video_index, _stem_index
-    _video_index, _stem_index = build_index(DATA_PATH)
+    _video_index, _stem_index = await asyncio.to_thread(build_index, DATA_PATH)
     if not _video_index:
         logger.warning("Rebuilt index is empty — no videos found under %s", DATA_PATH)
     return {"indexed": len(_video_index)}

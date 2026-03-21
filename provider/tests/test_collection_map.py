@@ -453,7 +453,7 @@ def test_recompute_empty_index(tmp_path):
         json.dump(data, f)
 
     stats = recompute_all_collections({}, map_path)
-    assert stats == {"matched": 0, "unmatched": 0}
+    assert stats == {"matched": 0, "unmatched": 0, "skipped": 0}
 
     result = _load_map(map_path)
     assert result["matched_ids"] == []

@@ -76,6 +76,10 @@ function ThumbGrid({ videos }) {
   );
 }
 
+function isAbsoluteUrl(url) {
+  return typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"));
+}
+
 function CollectionCard({ collection, videos, onChange, onDelete, otherNames, plexThumb }) {
   const [expanded, setExpanded] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
@@ -83,7 +87,8 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
   const [editing, setEditing] = useState(false);
   const [nameError, setNameError] = useState(null);
   const [imageEditing, setImageEditing] = useState(false);
-  const [editImageUrl, setEditImageUrl] = useState(collection.image || "");
+  const savedImage = isAbsoluteUrl(collection.image) ? collection.image : null;
+  const [editImageUrl, setEditImageUrl] = useState(savedImage || "");
 
   const matched = videos.filter((v) => v.collections.includes(collection.name));
 
@@ -114,7 +119,8 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
   };
 
   const saveImage = () => {
-    onChange({ ...collection, image: editImageUrl.trim() || null });
+    const url = editImageUrl.trim();
+    onChange({ ...collection, image: isAbsoluteUrl(url) ? url : null });
     setImageEditing(false);
   };
 
@@ -127,8 +133,8 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
   return (
     <div className="card">
       <div className="card-header" onClick={() => setExpanded((v) => !v)}>
-        {(collection.image || plexThumb) && (
-          <img src={collection.image || plexThumb} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+        {(savedImage || plexThumb) && (
+          <img src={savedImage || plexThumb} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
         )}
         {editing ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }} onClick={(e) => e.stopPropagation()}>

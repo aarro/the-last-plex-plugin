@@ -664,7 +664,9 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
     return {"ok": False, "created": False, "error": "No YAMP sections processed"}
 
 
-_PLEX_THUMB_PATH_RE = re.compile(r"^/library/collections/\d+/thumb$")
+_PLEX_THUMB_PATH_RE = re.compile(
+    r"^/library/(collections|metadata)/\d+/(thumb|composite)(/\d+(\?[a-zA-Z0-9=&]+)?)?$"
+)
 
 
 @app.get("/api/plex-collection-thumb")

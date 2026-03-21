@@ -406,8 +406,19 @@ async def test_plex_collection_thumb_valid_path(monkeypatch):
 
 
 @pytest.mark.parametrize("path", [
+    "/library/collections/42/thumb",
+    "/library/collections/2348/composite/1730728751",
+    "/library/collections/2348/composite/1730728751?width=400&height=600",
+    "/library/metadata/2376/thumb/1730839921",
+])
+def test_plex_thumb_path_re_valid(path):
+    """Regex accepts all Plex-observed thumb path shapes."""
+    assert yamp_app._PLEX_THUMB_PATH_RE.match(path)
+
+
+@pytest.mark.parametrize("path", [
     "/library/collections/abc/thumb",       # non-numeric ID
-    "/library/collections/42/thumb/extra",  # trailing chars
+    "/library/collections/42/thumb/extra",  # trailing non-numeric segment
     "/library/collections/../etc/passwd",   # path traversal
     "/library/collections/42/art",          # wrong endpoint
     "",                                     # empty

@@ -18,7 +18,14 @@
 body { background: var(--bg); color: var(--text); min-height: 100vh; }
 
 /* Layout */
-.app { max-width: 900px; margin: 0 auto; padding: 24px 16px 80px; }
+.app { max-width: 1400px; margin: 0 auto; padding: 24px 16px 80px; }
+
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 24px;
+  align-items: start;
+}
 
 header {
   display: flex; align-items: center; justify-content: space-between;
@@ -152,6 +159,42 @@ select option { background: var(--surface2); }
 .tag-chip-sm:hover { border-color: var(--accent); color: var(--accent); }
 .tag-more { font-size: 10px; color: var(--muted); padding: 1px 4px; cursor: pointer; }
 .tag-more:hover { color: var(--accent); }
+
+/* Rules toggle */
+.rules-toggle {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 0; cursor: pointer; font-size: 13px; color: var(--muted);
+  user-select: none;
+}
+.rules-toggle:hover { color: var(--text); }
+.rules-toggle-arrow { font-size: 10px; }
+
+/* Thumb strip inside collection cards */
+.thumb-strip {
+  display: flex; gap: 6px; overflow-x: auto;
+  padding: 8px 0 4px; scrollbar-width: thin;
+}
+.thumb-strip-item { flex: 0 0 auto; width: 100px; cursor: default; }
+.thumb-strip-item img { width: 100px; height: 56px; object-fit: cover; border-radius: 4px; display: block; }
+.thumb-strip-placeholder { width: 100px; height: 56px; background: var(--surface2); border-radius: 4px; }
+.thumb-title {
+  font-size: 10px; color: var(--muted);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 2px;
+}
+
+/* Discover panel grid */
+.discover-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 4px;
+}
+.discover-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; display: flex; flex-direction: column;
+}
+.discover-thumb { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: var(--surface2); }
+.discover-info { padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; flex: 1; }
 
 /* Misc */
 .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }

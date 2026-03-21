@@ -322,6 +322,7 @@ async def get_metadata(rating_key: str):
                 "resolve_collections failed for '%s' (collection state may not be persisted): %s",
                 video_id, e,
             )
+    logger.info("get_metadata: '%s' → collections=%s", video_id, collections)
 
     meta = build_metadata_response(info_json, collections, rating_key, IDENTIFIER, METADATA_KEY)
     return JSONResponse(_media_container([meta]))

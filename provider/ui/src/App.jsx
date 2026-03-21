@@ -1,21 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import Collections from "./Collections.jsx";
-import UnmatchedTags from "./UnmatchedTags.jsx";
-import VideoList from "./VideoList.jsx";
+import DiscoverPanel from "./DiscoverPanel.jsx";
 
 const API = "";
 
 export default function App() {
   const [data, setData] = useState(null);
+  const [videos, setVideos] = useState([]);
   const [dirty, setDirty] = useState(false);
-  const [status, setStatus] = useState(null); // {type: "ok"|"err", msg}
+  const [status, setStatus] = useState(null);
   const [saving, setSaving] = useState(false);
   const [rescanning, setRescanning] = useState(false);
-  const [collectionsKey, setCollectionsKey] = useState(0);
 
   const load = useCallback(async () => {
-    const res = await fetch(`${API}/api/collections`);
-    setData(await res.json());
+    const [colRes, vidRes] = await Promise.all([
+      fetch(`${API}/api/collections`),
+      fetch(`${API}/api/videos`),
+    ]);
+    setData(await colRes.json());
+    setVideos((await vidRes.json()).videos ?? []);
     setDirty(false);
   }, []);
 
@@ -39,7 +42,6 @@ export default function App() {
       const result = await res.json();
       setStatus({ type: "ok", msg: `Saved — ${result.matched} matched, ${result.unmatched} unmatched.` });
       await load();
-      setCollectionsKey((k) => k + 1);
     } catch (e) {
       setStatus({ type: "err", msg: `Save failed: ${e.message}` });
     } finally {
@@ -55,7 +57,7 @@ export default function App() {
       if (!res.ok) throw new Error(await res.text());
       const json = await res.json();
       const n = json.triggered_sections?.length ?? 0;
-      setStatus({ type: "ok", msg: `Rescan triggered on ${n} section${n !== 1 ? "s" : ""}.` });
+      setStatus({ type: n > 0 ? "ok" : "err", msg: n > 0 ? "Plex rescan triggered." : "Rescan failed — no YAMP-managed library found in Plex." });
     } catch (e) {
       setStatus({ type: "err", msg: `Rescan failed: ${e.message}` });
     } finally {
@@ -65,10 +67,7 @@ export default function App() {
 
   const createCollectionFromTag = (tag) => {
     const newCollection = {
-      name: tag
-        .split(" ")
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-        .join(" "),
+      name: tag.split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
       rules: [{ field: "tags", values: [tag], match: "exact" }],
     };
     setCollections([...(data?.collections ?? []), newCollection]);
@@ -96,17 +95,21 @@ export default function App() {
         </div>
       </header>
 
-      <Collections collections={data.collections} onChange={setCollections} />
-
-      <UnmatchedTags
-        tags={data.unmatched_tags}
-        onCreateCollection={createCollectionFromTag}
-      />
-
-      <VideoList
-        collectionsKey={collectionsKey}
-        onAddToCollection={createCollectionFromTag}
-      />
+      <div className="two-col">
+        <div className="col-left">
+          <Collections
+            collections={data.collections}
+            videos={videos}
+            onChange={setCollections}
+          />
+        </div>
+        <div className="col-right">
+          <DiscoverPanel
+            videos={videos}
+            onAddToCollection={createCollectionFromTag}
+          />
+        </div>
+      </div>
 
       <div className="action-bar">
         {status && (

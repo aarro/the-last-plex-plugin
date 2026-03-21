@@ -41,10 +41,32 @@ function RuleForm({ rule, onChange, onRemove }) {
   );
 }
 
-function CollectionCard({ collection, onChange, onDelete }) {
+function ThumbStrip({ videos }) {
+  if (videos.length === 0) {
+    return <p className="empty" style={{ paddingTop: 8 }}>No videos matched yet.</p>;
+  }
+  return (
+    <div className="thumb-strip">
+      {videos.map((v) => (
+        <div key={v.id} className="thumb-strip-item" title={v.title}>
+          {v.thumbnail
+            ? <img src={v.thumbnail} alt="" loading="lazy" />
+            : <div className="thumb-strip-placeholder" />
+          }
+          <div className="thumb-title">{v.title}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CollectionCard({ collection, videos, onChange, onDelete }) {
   const [expanded, setExpanded] = useState(false);
+  const [rulesOpen, setRulesOpen] = useState(false);
   const [editName, setEditName] = useState(collection.name);
   const [editing, setEditing] = useState(false);
+
+  const matched = videos.filter((v) => v.collections.includes(collection.name));
 
   const updateRule = (i, rule) => {
     const rules = [...collection.rules];
@@ -85,7 +107,7 @@ function CollectionCard({ collection, onChange, onDelete }) {
         )}
         <div className="card-actions" onClick={(e) => e.stopPropagation()}>
           <span style={{ fontSize: 12, color: "var(--muted)" }}>
-            {collection.rules.length} rule{collection.rules.length !== 1 ? "s" : ""}
+            {matched.length} video{matched.length !== 1 ? "s" : ""}
           </span>
           <button className="btn-icon" title="Rename" onClick={() => { setEditing(true); setExpanded(true); }}>✏️</button>
           <button className="btn-icon btn-danger" title="Delete collection" onClick={onDelete}>🗑</button>
@@ -95,22 +117,33 @@ function CollectionCard({ collection, onChange, onDelete }) {
 
       {expanded && (
         <div className="card-body">
-          {collection.rules.length === 0 && (
-            <p className="empty">No rules — add one below.</p>
-          )}
-          <div className="rules">
-            {collection.rules.map((rule, i) => (
-              <RuleForm
-                key={i}
-                rule={rule}
-                onChange={(r) => updateRule(i, r)}
-                onRemove={() => removeRule(i)}
-              />
-            ))}
+          <ThumbStrip videos={matched} />
+
+          <div className="rules-toggle" onClick={() => setRulesOpen((v) => !v)}>
+            <span className="rules-toggle-arrow">{rulesOpen ? "▲" : "▶"}</span>
+            <span>Rules ({collection.rules.length})</span>
           </div>
-          <button className="btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={addRule}>
-            + Add Rule
-          </button>
+
+          {rulesOpen && (
+            <>
+              {collection.rules.length === 0 && (
+                <p className="empty">No rules — add one below.</p>
+              )}
+              <div className="rules">
+                {collection.rules.map((rule, i) => (
+                  <RuleForm
+                    key={i}
+                    rule={rule}
+                    onChange={(r) => updateRule(i, r)}
+                    onRemove={() => removeRule(i)}
+                  />
+                ))}
+              </div>
+              <button className="btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={addRule}>
+                + Add Rule
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -147,7 +180,7 @@ function AddCollectionForm({ onAdd, onCancel }) {
   );
 }
 
-export default function Collections({ collections, onChange }) {
+export default function Collections({ collections, videos, onChange }) {
   const [adding, setAdding] = useState(false);
 
   const updateAt = (i, c) => {
@@ -179,6 +212,7 @@ export default function Collections({ collections, onChange }) {
         <CollectionCard
           key={i}
           collection={c}
+          videos={videos}
           onChange={(updated) => updateAt(i, updated)}
           onDelete={() => deleteAt(i)}
         />

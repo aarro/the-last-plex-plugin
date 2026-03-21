@@ -233,18 +233,18 @@ def _make_sections_response(sections):
     return resp
 
 
-def _make_rescan_mock(sections, put_side_effect=None):
-    """Build a mock httpx.AsyncClient for api_rescan tests (GET sections + PUT refresh)."""
+def _make_rescan_mock(sections, refresh_side_effect=None):
+    """Build a mock httpx.AsyncClient for api_rescan tests (GET sections + GET refresh)."""
     mock_client = AsyncMock()
     mock_client.__aenter__.return_value = mock_client
     mock_client.__aexit__.return_value = False
-    mock_client.get.return_value = _make_sections_response(sections)
-    if put_side_effect is not None:
-        mock_client.put.side_effect = put_side_effect
+    sections_resp = _make_sections_response(sections)
+    if refresh_side_effect is not None:
+        mock_client.get.side_effect = [sections_resp, refresh_side_effect]
     else:
-        put_resp = MagicMock()
-        put_resp.raise_for_status = MagicMock()
-        mock_client.put.return_value = put_resp
+        refresh_resp = MagicMock()
+        refresh_resp.raise_for_status = MagicMock()
+        mock_client.get.side_effect = [sections_resp, refresh_resp]
     return mock_client
 
 
@@ -342,7 +342,7 @@ async def test_api_rescan_per_section_timeout(monkeypatch):
     monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
     monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
     sections = [{"key": "1", "agent": yamp_app.IDENTIFIER, "title": "YouTube Movies"}]
-    mock_client = _make_rescan_mock(sections, put_side_effect=httpx.TimeoutException("timed out"))
+    mock_client = _make_rescan_mock(sections, refresh_side_effect=httpx.TimeoutException("timed out"))
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         with patch("httpx.AsyncClient", return_value=mock_client):
             resp = await client.post("/api/rescan")

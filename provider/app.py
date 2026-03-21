@@ -427,6 +427,7 @@ def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> l
             "upload_date": upload_date,
             "collections": c_matches,
             "matched": bool(c_matches),
+            "tags": info_json.get("tags", []),
         })
 
     videos.sort(key=lambda v: v["upload_date"], reverse=True)
@@ -502,7 +503,7 @@ async def api_rescan():
                     logger.warning("Skipping section with non-numeric key: %r", section_id)
                     continue
                 try:
-                    resp = await client.put(
+                    resp = await client.get(
                         f"{PLEX_URL}/library/sections/{section_id}/refresh",
                         headers=plex_headers,
                         params={"force": 1},

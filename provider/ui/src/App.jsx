@@ -11,6 +11,7 @@ export default function App() {
   const [status, setStatus] = useState(null); // {type: "ok"|"err", msg}
   const [saving, setSaving] = useState(false);
   const [rescanning, setRescanning] = useState(false);
+  const [collectionsKey, setCollectionsKey] = useState(0);
 
   const load = useCallback(async () => {
     const res = await fetch(`${API}/api/collections`);
@@ -38,6 +39,7 @@ export default function App() {
       const result = await res.json();
       setStatus({ type: "ok", msg: `Saved — ${result.matched} matched, ${result.unmatched} unmatched.` });
       await load();
+      setCollectionsKey((k) => k + 1);
     } catch (e) {
       setStatus({ type: "err", msg: `Save failed: ${e.message}` });
     } finally {
@@ -101,7 +103,10 @@ export default function App() {
         onCreateCollection={createCollectionFromTag}
       />
 
-      <VideoList />
+      <VideoList
+        collectionsKey={collectionsKey}
+        onAddToCollection={createCollectionFromTag}
+      />
 
       <div className="action-bar">
         {status && (

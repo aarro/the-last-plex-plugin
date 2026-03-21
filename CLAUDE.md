@@ -4,6 +4,7 @@
 
 ```
 the-last-plex-plugin/
+├── Makefile                              # Common dev tasks (test, build, dev, docker-*)
 ├── legacy/
 │   └── youtube-as-movies-agent.bundle/   # Original Python .bundle (reference only)
 └── provider/                             # YAMP — the active HTTP provider
@@ -40,6 +41,8 @@ On startup, YAMP walks `YOUTUBE_DATA_PATH` and builds an in-memory index: `{vide
 
 When Plex calls the match endpoint with a filename, `extract_video_id()` in `metadata.py` uses a regex to pull the ID from the `[...]` suffix.
 
+**New video self-registration:** when Plex matches a file not yet in the index, YAMP checks for the sidecar `.info.json` alongside the media file path that Plex provided (`_try_index_from_filename()`). If found, that single entry is added to the index immediately — no full directory walk required. This means new downloads are picked up on first Plex scan with no delay.
+
 ### Plex API Flow
 
 1. **`GET /movies`** — Plex discovers the provider. Returns `MediaProvider` JSON with identifier `tv.plex.agents.custom.yamp`.
@@ -47,7 +50,7 @@ When Plex calls the match endpoint with a filename, `extract_video_id()` in `met
 3. **`GET /movies/library/metadata/{rating_key}`** — Plex fetches full metadata. We read the `.info.json`, run collection matching, and return the full response.
 4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the thumbnail as `coverPoster`. When `YAMP_URL` is set, always returns `{YAMP_URL}/api/thumbnail/{video_id}` so Plex gets a YAMP-served URL (Plex can't reliably reach YouTube directly). Falls back to the YouTube URL from `thumbnail` if `YAMP_URL` is not configured.
 
-`rating_key` format: `youtube-{video_id}`.
+`rating_key` format: bare `{video_id}` (e.g. `dQw4w9WgXcQ`).
 
 ### Metadata Mapping
 
@@ -105,7 +108,7 @@ Each collection can have an optional `image` URL. On `PUT /api/collections`, YAM
 
 The 📷 button in the UI is only shown when a collection has matched videos — this ensures the create-collection path always has items to work with.
 
-**Pre-populating from Plex:** `GET /api/collections` fetches existing collection poster paths from Plex (via `_fetch_plex_collection_thumbs()`) and includes a `plex_thumb` field per collection. Clicking 📷 on a collection that already has a poster in Plex (but no local `image` set) pre-populates the URL editor with the Plex poster, routed through `/api/plex-collection-thumb?path=…` so the Plex token never reaches the browser.
+**Pre-populating from Plex:** `GET /api/collections` fetches existing collection poster paths from Plex (via `_fetch_plex_collection_thumbs()`) and includes a `plex_thumb` field per collection. This is a relative proxy path (`/api/plex-collection-thumb?path=…`) so the Plex token never reaches the browser. In the UI, `plex_thumb` is used as a display-only preview (shown in the card header and image editor preview) but is never written into the URL input field or saved as `collection.image` — only absolute `https://` URLs entered by the user are persisted.
 
 If `PLEX_URL` / `PLEX_TOKEN` are not set, artwork push and `plex_thumb` fetch are skipped silently. Failures are surfaced per-collection in the `PUT /api/collections` response and shown in the UI status bar.
 
@@ -120,33 +123,33 @@ If `PLEX_URL` / `PLEX_TOKEN` are not set, artwork push and `plex_thumb` fetch ar
 
 ## Running Locally
 
-### Backend (Python)
+A `Makefile` at the repo root wraps all common tasks:
 
 ```bash
-cd provider
-uv sync
-YOUTUBE_DATA_PATH=/path/to/your/youtube/downloads uv run uvicorn app:app --reload --port 8765
+make test          # run pytest
+make build         # build React UI
+make dev           # backend dev server (port 8765, auto-reload)
+make dev-ui        # UI dev server (proxies /api → localhost:8765)
+make docker-build  # build Docker image
+make docker-up     # start containers (detached)
+make docker-down   # stop containers
+make logs          # tail Docker logs
 ```
 
-### UI (dev mode with proxy)
+### Manual commands
 
 ```bash
-cd provider/ui
-bun install
-bun run dev          # proxies /api → localhost:8765
-```
+# Backend
+uv --directory provider run uvicorn app:app --reload --port 8765
 
-### Tests
+# UI
+bun --cwd provider/ui run dev
 
-```bash
+# Tests
 uv --directory provider run pytest
-```
 
-### Docker (production)
-
-```bash
-cd provider
-docker compose up -d --build
+# Docker
+docker compose --project-directory provider up -d --build
 ```
 
 Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` and populate `.env` with `PLEX_URL`, `PLEX_TOKEN`, `PLEX_CLAIM`.
@@ -166,14 +169,15 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 | `PLEX_URL`           | —        | e.g. `http://192.168.1.10:32400`     |
 | `PLEX_TOKEN`         | —        | Your X-Plex-Token                    |
 | `PORT`               | `8765`   | Port the server listens on           |
-| `API_KEY`            | —        | Bearer token for write API endpoints (`PUT /api/collections`, `POST /api/rescan`, `POST /api/index/rebuild`). If unset, those endpoints are open (backward-compatible). |
+| `API_KEY`            | —        | Bearer token for write API endpoints (`PUT /api/collections`, `POST /api/rescan`, `POST /api/thumbnails/fix`, `POST /api/index/rebuild`). If unset, those endpoints are open (backward-compatible). |
 | `YAMP_URL`           | —        | Public URL of this YAMP instance (e.g. `http://192.168.1.10:8765`). Required for Plex to load thumbnails — when set, all video thumbnails are proxied through YAMP rather than served as raw YouTube URLs. |
 
 ## Key Files
 
+- `Makefile` — common dev tasks (test, build, dev, docker-*)
 - `provider/collection_map.py` — `match_video()`, `resolve_collections()`, `recompute_all_collections()`, `find_collection_map()`
 - `provider/metadata.py` — `extract_video_id()`, `build_metadata_response()`
-- `provider/app.py` — all FastAPI routes; `_sync_collection_artwork()`, `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, thumbnail proxy + Plex collection thumb proxy
-- `provider/ui/src/App.jsx` — React root, state management, save/rescan actions
-- `provider/ui/src/Collections.jsx` — collection editor (rules, name, poster image)
+- `provider/app.py` — all FastAPI routes; `_sync_collection_artwork()`, `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, `_fix_all_thumbnails()`, `_try_index_from_filename()`, thumbnail proxy + Plex collection thumb proxy
+- `provider/ui/src/App.jsx` — React root, state management, save/rescan/fix-thumbnails actions
+- `provider/ui/src/Collections.jsx` — collection editor (rules, name, poster image); plex_thumb shown as display-only preview
 - `provider/ui/src/DiscoverPanel.jsx` — video browser; click any tag to create a collection from it

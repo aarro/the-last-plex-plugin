@@ -11,6 +11,7 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [saving, setSaving] = useState(false);
   const [rescanning, setRescanning] = useState(false);
+  const [fixingThumbs, setFixingThumbs] = useState(false);
 
   const load = useCallback(async () => {
     const [colRes, vidRes] = await Promise.all([
@@ -75,6 +76,23 @@ export default function App() {
     }
   };
 
+  const fixThumbnails = async () => {
+    setFixingThumbs(true);
+    setStatus(null);
+    try {
+      const res = await fetch(`${API}/api/thumbnails/fix`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      let json;
+      try { json = await res.json(); } catch { throw new Error("Server returned invalid response"); }
+      const msg = `Thumbnails fixed: ${json.fixed} updated, ${json.failed} failed, ${json.skipped} skipped.`;
+      setStatus({ type: json.failed > 0 ? "err" : "ok", msg });
+    } catch (e) {
+      setStatus({ type: "err", msg: `Fix thumbnails failed: ${e.message}` });
+    } finally {
+      setFixingThumbs(false);
+    }
+  };
+
   const createCollectionFromTag = (tag) => {
     const newCollection = {
       name: tag.split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
@@ -125,6 +143,9 @@ export default function App() {
         {status && (
           <span className={`status ${status.type}`}>{status.msg}</span>
         )}
+        <button className="btn-ghost" onClick={fixThumbnails} disabled={fixingThumbs}>
+          {fixingThumbs ? "Fixing…" : "Fix Thumbnails"}
+        </button>
         <button className="btn-ghost" onClick={rescan} disabled={rescanning}>
           {rescanning ? "Rescanning…" : "Rescan Plex"}
         </button>

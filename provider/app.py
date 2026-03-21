@@ -89,6 +89,25 @@ def build_index(data_path: str) -> tuple[dict[str, str], dict[str, str]]:
     return index, stem_index
 
 
+def _try_index_from_filename(video_id: str, media_path: str) -> bool:
+    """Try to index a single video by finding its .info.json alongside the media file.
+
+    Plex sends the full media file path in the match request. The sidecar .info.json
+    lives next to it (yt-dlp flat layout) or in the same per-video folder (MeTube layout).
+    Returns True if the entry was added to the index.
+    """
+    p = Path(media_path)
+    # yt-dlp flat:  Title [ID].mp4  →  Title [ID].info.json
+    # MeTube:       Title [ID]/Title.mp4  →  Title [ID]/Title.info.json
+    candidate = p.with_suffix(".info.json")
+    if candidate.is_file():
+        _video_index[video_id] = str(candidate)
+        _stem_index[candidate.name.removesuffix(".info.json")] = video_id
+        logger.info("Indexed new video '%s' from sidecar: %s", video_id, candidate)
+        return True
+    return False
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 
@@ -211,6 +230,9 @@ async def match(request: Request):
         safe_filename = "".join(c for c in filename[:256] if c >= " ")
         logger.warning("Could not extract video ID from filename: %s", safe_filename)
         return JSONResponse(_media_container([]))
+
+    if video_id not in _video_index and filename:
+        _try_index_from_filename(video_id, filename)
 
     try:
         info_json = await _get_info_json(video_id)
@@ -739,6 +761,70 @@ async def api_rescan():
                     failed.append({"section_id": section_id, "error": str(e)})
 
     return {"triggered_sections": triggered, "failed_sections": failed}
+
+
+def _fix_all_thumbnails() -> dict:
+    """Upload YAMP-proxied thumbnails for every video in YAMP-managed Plex sections.
+
+    Synchronous — call via asyncio.to_thread. Returns {fixed, failed, skipped}.
+    """
+    import requests.exceptions
+    from plexapi.exceptions import PlexApiException
+    from plexapi.server import PlexServer
+
+    if not YAMP_URL:
+        return {"fixed": 0, "failed": 0, "skipped": 0, "error": "YAMP_URL not set"}
+
+    try:
+        plex = PlexServer(PLEX_URL, PLEX_TOKEN)
+    except (PlexApiException, requests.exceptions.RequestException) as e:
+        logger.error("_fix_all_thumbnails: Plex connection failed: %s", e)
+        return {"fixed": 0, "failed": 0, "skipped": 0, "error": f"Plex connection failed: {e}"}
+
+    fixed = failed = skipped = 0
+    try:
+        sections = plex.library.sections()
+    except (PlexApiException, requests.exceptions.RequestException) as e:
+        logger.error("_fix_all_thumbnails: failed to fetch sections: %s", e)
+        return {"fixed": 0, "failed": 0, "skipped": 0, "error": f"Could not list sections: {e}"}
+
+    for section in sections:
+        if section.agent != IDENTIFIER:
+            continue
+        try:
+            items = section.all()
+        except (PlexApiException, requests.exceptions.RequestException) as e:
+            logger.error("_fix_all_thumbnails: failed to list items in section '%s': %s", section.title, e)
+            failed += 1
+            continue
+        for item in items:
+            video_id = item.ratingKey
+            if not _validate_video_id(video_id):
+                logger.warning("_fix_all_thumbnails: skipping item with unexpected ratingKey %r", video_id)
+                skipped += 1
+                continue
+            try:
+                item.uploadPoster(url=f"{YAMP_URL}/api/thumbnail/{video_id}")
+                fixed += 1
+            except (PlexApiException, requests.exceptions.RequestException) as e:
+                logger.error("_fix_all_thumbnails: uploadPoster failed for %r: %s", video_id, e)
+                failed += 1
+
+    logger.info("_fix_all_thumbnails: done — fixed=%d failed=%d skipped=%d", fixed, failed, skipped)
+    return {"fixed": fixed, "failed": failed, "skipped": skipped}
+
+
+@app.post("/api/thumbnails/fix", dependencies=[Depends(_require_api_key)])
+async def api_fix_thumbnails():
+    """Push YAMP-proxied thumbnails to Plex for all videos in YAMP-managed libraries."""
+    if not PLEX_URL or not PLEX_TOKEN:
+        raise HTTPException(status_code=400, detail="PLEX_URL and PLEX_TOKEN env vars not set")
+    if not YAMP_URL:
+        raise HTTPException(status_code=400, detail="YAMP_URL env var not set")
+    result = await asyncio.to_thread(_fix_all_thumbnails)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
 
 
 @app.post("/api/index/rebuild", dependencies=[Depends(_require_api_key)])

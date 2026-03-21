@@ -17,6 +17,8 @@ Plex deprecated their legacy Python plugin framework in 2026. This replaces the 
 - **Web UI** at `http://localhost:8765` to add/edit/delete collections and rules
 - **Discover panel** — browse unmatched (or all) videos, search by title/channel/tag, click any tag to instantly create a collection from it
 - **Rescan button** — trigger a Plex metadata refresh directly from the UI
+- **Fix Thumbnails button** — backfill YAMP-proxied thumbnails for all existing videos (one-time migration; new downloads are handled automatically)
+- **Makefile** for common dev tasks: `make test`, `make build`, `make dev`, `make docker-up`, etc.
 - **Docker Compose** setup with Plex + MeTube + YAMP all sharing one volume
 
 ## Requirements
@@ -29,13 +31,13 @@ Plex deprecated their legacy Python plugin framework in 2026. This replaces the 
 
 ```bash
 git clone https://github.com/aarro/the-last-plex-plugin
-cd the-last-plex-plugin/provider
+cd the-last-plex-plugin
 
-# 1. Edit docker-compose.yml — set the youtube-data volume device path
-# 2. Create .env with PLEX_URL, PLEX_TOKEN, PLEX_CLAIM, and YAMP_URL
+# 1. Edit provider/docker-compose.yml — set the youtube-data volume device path
+# 2. Create provider/.env with PLEX_URL, PLEX_TOKEN, PLEX_CLAIM, and YAMP_URL
 #    YAMP_URL is the address Plex uses to load thumbnails (all thumbnails are proxied through YAMP)
 
-docker compose up -d --build
+make docker-up
 ```
 
 Then in Plex: **Settings → Troubleshooting → Metadata Agents → Add Agent** → enter `http://<host>:8765/movies`.

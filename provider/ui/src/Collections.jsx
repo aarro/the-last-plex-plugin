@@ -127,8 +127,8 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
   return (
     <div className="card">
       <div className="card-header" onClick={() => setExpanded((v) => !v)}>
-        {collection.image && (
-          <img src={collection.image} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+        {(collection.image || plexThumb) && (
+          <img src={collection.image || plexThumb} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
         )}
         {editing ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }} onClick={(e) => e.stopPropagation()}>
@@ -154,7 +154,6 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
           <button className="btn-icon" title="Rename" onClick={() => { setEditing(true); setExpanded(true); }}>✏️</button>
           {matched.length > 0 && (
             <button className="btn-icon" title="Set collection image" onClick={() => {
-            if (!editImageUrl && plexThumb) setEditImageUrl(plexThumb);
             setImageEditing(v => !v);
             setExpanded(true);
           }}>📷</button>
@@ -175,8 +174,8 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
                 placeholder="https://…"
                 style={{ flex: 1 }}
               />
-              {editImageUrl && (
-                <img src={editImageUrl} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+              {(editImageUrl || plexThumb) && (
+                <img src={editImageUrl || plexThumb} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
               )}
               <button className="btn-primary btn-sm" onClick={saveImage}>Save</button>
               <button className="btn-ghost btn-sm" onClick={clearImage}>Clear</button>

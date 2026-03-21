@@ -40,8 +40,8 @@ YAMP_URL = os.environ.get("YAMP_URL", "").rstrip("/")
 PORT = int(os.environ.get("PORT", "8765"))
 API_KEY = os.environ.get("API_KEY", "")
 
-METADATA_KEY = "/movies/library/metadata"
-MATCH_KEY = "/movies/library/metadata/matches"
+METADATA_KEY = "/library/metadata"
+MATCH_KEY = "/library/metadata/matches"
 
 # ── Video index ───────────────────────────────────────────────────────────────
 # Maps video_id → absolute path to its .info.json file

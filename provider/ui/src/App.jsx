@@ -41,7 +41,11 @@ export default function App() {
       if (!res.ok) throw new Error(await res.text());
       let result;
       try { result = await res.json(); } catch { throw new Error("Server returned invalid response"); }
-      setStatus({ type: "ok", msg: `Saved — ${result.matched} matched, ${result.unmatched} unmatched.` });
+      const artworkFails = Object.entries(result.artwork ?? {})
+        .filter(([, v]) => !v.ok).map(([k]) => k);
+      const msg = `Saved — ${result.matched} matched, ${result.unmatched} unmatched.`
+        + (artworkFails.length ? ` Artwork failed for: ${artworkFails.join(", ")}.` : "");
+      setStatus({ type: artworkFails.length ? "err" : "ok", msg });
       await load();
     } catch (e) {
       setStatus({ type: "err", msg: `Save failed: ${e.message}` });

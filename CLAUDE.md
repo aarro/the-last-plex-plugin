@@ -14,13 +14,20 @@ the-last-plex-plugin/
     ├── Dockerfile                        # Multi-stage: bun (UI build) + python/uv (server)
     ├── docker-compose.yml                # Template: plex + metube + yamp
     ├── tests/                            # pytest tests for Python logic
+    │   ├── test_app.py                   # FastAPI endpoint tests
+    │   ├── test_collection_map.py        # Collection matching logic tests
+    │   ├── test_metadata.py              # Metadata mapping tests
     │   └── fixtures/                     # sample.info.json, _collection_map.json
     └── ui/                               # React SPA (Vite + bun)
+        ├── index.html
+        ├── package.json
+        ├── vite.config.js
         └── src/
+            ├── main.jsx                  # Entry point
             ├── App.jsx                   # Root: fetches data, owns state, action bar
-            ├── Collections.jsx           # Collection list with rule editor
-            ├── VideoList.jsx             # Video grid with collection badges
-            └── UnmatchedTags.jsx         # Unmatched tag chips with "create" action
+            ├── App.css                   # Global styles
+            ├── Collections.jsx           # Collection list with rule editor + image picker
+            └── DiscoverPanel.jsx         # Video browser: search unmatched/all, click tags to create collections
 ```
 
 ## How YAMP Works
@@ -65,6 +72,7 @@ Lives at `YOUTUBE_DATA_PATH/_collection_map.json`. Schema:
   "collections": [
     {
       "name": "GoGo Penguin",
+      "image": "https://example.com/poster.jpg",
       "rules": [
         { "field": "tags",    "values": ["gogo penguin"], "match": "exact" },
         { "field": "title",   "values": ["gogo penguin"], "match": "in"    },
@@ -85,6 +93,19 @@ Lives at `YOUTUBE_DATA_PATH/_collection_map.json`. Schema:
 **Tag behaviour:** tags are consumed on match to prevent the same tag matching multiple collections.
 
 **State tracking:** `matched_ids` prevents reprocessing on subsequent Plex scans. `unmatched_tags` surfaces patterns for new collections (sorted by frequency, visible in the UI).
+
+### Collection Artwork
+
+Each collection can have an optional `image` URL. On `PUT /api/collections`, YAMP pushes that URL as the collection poster in Plex:
+
+1. Connect to Plex via `plexapi` (`PLEX_URL` + `PLEX_TOKEN`)
+2. Find the YAMP-managed library section (agent == `tv.plex.agents.custom.yamp`)
+3. Find the existing Plex collection by name, or create it by matching YAMP-tracked videos against the collection rules
+4. Call `plex_col.uploadPoster(url=image)` to set the poster
+
+The 🖼 button in the UI is only shown when a collection has matched videos — this ensures the create-collection path always has items to work with.
+
+If `PLEX_URL` / `PLEX_TOKEN` are not set, artwork push is skipped silently. Failures are surfaced per-collection in the `PUT /api/collections` response and shown in the UI status bar.
 
 ## Running Locally
 
@@ -139,8 +160,9 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 
 ## Key Files
 
-- `provider/collection_map.py` — `resolve_collections()`, `find_collection_map()`
+- `provider/collection_map.py` — `match_video()`, `resolve_collections()`, `recompute_all_collections()`, `find_collection_map()`
 - `provider/metadata.py` — `extract_video_id()`, `build_metadata_response()`
-- `provider/app.py` — all FastAPI routes
-- `provider/ui/src/App.jsx` — React root, state management
-- `provider/ui/src/Collections.jsx` — collection editor
+- `provider/app.py` — all FastAPI routes; `_sync_collection_artwork()`, `_find_matching_plex_items()`
+- `provider/ui/src/App.jsx` — React root, state management, save/rescan actions
+- `provider/ui/src/Collections.jsx` — collection editor (rules, name, poster image)
+- `provider/ui/src/DiscoverPanel.jsx` — video browser; click any tag to create a collection from it

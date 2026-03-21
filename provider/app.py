@@ -10,7 +10,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -354,6 +354,7 @@ class RuleModel(BaseModel):
 class CollectionModel(BaseModel):
     name: str
     rules: List[RuleModel]
+    image: Optional[str] = None
 
 
 class CollectionsBody(BaseModel):
@@ -412,7 +413,14 @@ async def api_put_collections(body: CollectionsBody):
     except (OSError, ValueError) as e:
         logger.error("api_put_collections: recompute failed: %s", e)
         raise HTTPException(status_code=500, detail="Collections saved but recompute failed — trigger a rescan to retry")
-    return {"ok": True, **stats}
+
+    artwork: dict = {}
+    if PLEX_URL and PLEX_TOKEN:
+        for col in body.collections:
+            if col.image:
+                artwork[col.name] = await asyncio.to_thread(_sync_collection_artwork, col)
+
+    return {"ok": True, **stats, "artwork": artwork}
 
 
 def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> tuple[list[dict], list[str]]:
@@ -504,6 +512,73 @@ async def _fetch_plex_sections(client: httpx.AsyncClient) -> list[dict]:
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="Plex returned unexpected response format")
     return data.get("MediaContainer", {}).get("Directory", [])
+
+
+def _find_matching_plex_items(section, col_spec: list) -> list:
+    """Return Plex video objects in `section` whose info_json matches col_spec."""
+    results = []
+    for item in section.all():
+        guid = getattr(item, "guid", "") or ""
+        if "youtube-" not in guid:
+            continue
+        video_id = guid.split("youtube-")[-1].rstrip("/")
+        info_path = _video_index.get(video_id)
+        if not info_path:
+            continue
+        try:
+            with open(info_path, encoding="utf-8") as f:
+                info_json = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        matches, _ = match_video(info_json, col_spec)
+        if matches:
+            results.append(item)
+    return results
+
+
+def _sync_collection_artwork(col: CollectionModel) -> dict:
+    """Ensure `col` exists in Plex and upload its poster. Synchronous — call via asyncio.to_thread."""
+    from plexapi.server import PlexServer
+    from plexapi.exceptions import NotFound
+
+    if not col.image:
+        return {"ok": False, "created": False, "error": "no image set"}
+    try:
+        plex = PlexServer(PLEX_URL, PLEX_TOKEN)
+    except Exception as e:
+        logger.error("_sync_collection_artwork: Plex connection failed: %s", e)
+        return {"ok": False, "created": False, "error": f"Plex connection failed: {e}"}
+
+    col_spec = [{"name": col.name, "rules": [r.model_dump() for r in col.rules]}]
+    yamp_sections = [s for s in plex.library.sections() if s.agent == IDENTIFIER]
+    if not yamp_sections:
+        return {"ok": False, "created": False, "error": "No YAMP-managed sections found in Plex"}
+
+    for section in yamp_sections:
+        created = False
+        try:
+            plex_col = section.collection(col.name)
+        except NotFound:
+            items = _find_matching_plex_items(section, col_spec)
+            if not items:
+                return {"ok": False, "created": False, "error": f"'{col.name}' not in Plex and no matching videos found"}
+            try:
+                plex_col = plex.createCollection(title=col.name, section=section, items=items)
+                created = True
+            except Exception as e:
+                logger.error("_sync_collection_artwork: createCollection failed for '%s': %s", col.name, e)
+                return {"ok": False, "created": False, "error": f"Could not create collection: {e}"}
+
+        try:
+            plex_col.uploadPoster(url=col.image)
+        except Exception as e:
+            logger.error("_sync_collection_artwork: uploadPoster failed for '%s': %s", col.name, e)
+            return {"ok": False, "created": created, "error": f"Poster upload failed: {e}"}
+
+        logger.info("_sync_collection_artwork: '%s' — ok (created=%s)", col.name, created)
+        return {"ok": True, "created": created, "error": None}
+
+    return {"ok": False, "created": False, "error": "No YAMP sections processed"}
 
 
 @app.get("/api/plex/sections")

@@ -8,6 +8,8 @@ function emptyRule() {
 }
 
 function RuleForm({ rule, onChange, onRemove }) {
+  const [rawValues, setRawValues] = useState(rule.values.join(", "));
+
   return (
     <div className="rule-form">
       <div className="form-group">
@@ -26,13 +28,14 @@ function RuleForm({ rule, onChange, onRemove }) {
         <label>Values (comma-separated)</label>
         <input
           type="text"
-          value={rule.values.join(", ")}
-          onChange={(e) =>
+          value={rawValues}
+          onChange={(e) => {
+            setRawValues(e.target.value);
             onChange({
               ...rule,
               values: e.target.value.split(",").map((v) => v.trim()).filter(Boolean),
-            })
-          }
+            });
+          }}
           placeholder="value one, value two"
         />
       </div>
@@ -41,30 +44,46 @@ function RuleForm({ rule, onChange, onRemove }) {
   );
 }
 
-function ThumbStrip({ videos }) {
+const THUMB_PAGE = 4;
+
+function ThumbGrid({ videos }) {
+  const [expanded, setExpanded] = useState(false);
   if (videos.length === 0) {
     return <p className="empty" style={{ paddingTop: 8 }}>No videos matched yet.</p>;
   }
+  const shown = expanded ? videos : videos.slice(0, THUMB_PAGE);
+  const hidden = videos.length - THUMB_PAGE;
   return (
-    <div className="thumb-strip">
-      {videos.map((v) => (
-        <div key={v.id} className="thumb-strip-item" title={v.title}>
-          {v.thumbnail
-            ? <img src={v.thumbnail} alt="" loading="lazy" />
-            : <div className="thumb-strip-placeholder" />
-          }
-          <div className="thumb-title">{v.title}</div>
-        </div>
-      ))}
-    </div>
+    <>
+      <div className="thumb-grid">
+        {shown.map((v) => (
+          <div key={v.id} className="thumb-strip-item" title={v.title}>
+            {v.thumbnail
+              ? <img src={v.thumbnail} alt="" loading="lazy" />
+              : <div className="thumb-strip-placeholder" />
+            }
+            <div className="thumb-title">{v.title}</div>
+          </div>
+        ))}
+      </div>
+      {videos.length > THUMB_PAGE && (
+        <button className="btn-ghost btn-sm" style={{ marginTop: 6 }}
+          onClick={() => setExpanded(v => !v)}>
+          {expanded ? "Show fewer ▲" : `Show ${hidden} more ▼`}
+        </button>
+      )}
+    </>
   );
 }
 
-function CollectionCard({ collection, videos, onChange, onDelete }) {
+function CollectionCard({ collection, videos, onChange, onDelete, otherNames }) {
   const [expanded, setExpanded] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [editName, setEditName] = useState(collection.name);
   const [editing, setEditing] = useState(false);
+  const [nameError, setNameError] = useState(null);
+  const [imageEditing, setImageEditing] = useState(false);
+  const [editImageUrl, setEditImageUrl] = useState(collection.image || "");
 
   const matched = videos.filter((v) => v.collections.includes(collection.name));
 
@@ -83,25 +102,48 @@ function CollectionCard({ collection, videos, onChange, onDelete }) {
   };
 
   const saveName = () => {
-    if (editName.trim()) onChange({ ...collection, name: editName.trim() });
+    const trimmed = editName.trim();
+    if (!trimmed) { setEditing(false); return; }
+    if (otherNames.includes(trimmed)) {
+      setNameError(`"${trimmed}" already exists`);
+      return;
+    }
+    setNameError(null);
+    onChange({ ...collection, name: trimmed });
     setEditing(false);
+  };
+
+  const saveImage = () => {
+    onChange({ ...collection, image: editImageUrl.trim() || null });
+    setImageEditing(false);
+  };
+
+  const clearImage = () => {
+    setEditImageUrl("");
+    onChange({ ...collection, image: null });
+    setImageEditing(false);
   };
 
   return (
     <div className="card">
       <div className="card-header" onClick={() => setExpanded((v) => !v)}>
+        {collection.image && (
+          <img src={collection.image} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+        )}
         {editing ? (
-          <input
-            type="text"
-            className="card-title"
-            value={editName}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => setEditName(e.target.value)}
-            onBlur={saveName}
-            onKeyDown={(e) => { if (e.key === "Enter") saveName(); }}
-            autoFocus
-            style={{ background: "none", border: "none", borderBottom: "1px solid var(--accent)", borderRadius: 0, padding: "0 2px", width: "auto", fontSize: 15 }}
-          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }} onClick={(e) => e.stopPropagation()}>
+            <input
+              type="text"
+              className="card-title"
+              value={editName}
+              onChange={(e) => { setEditName(e.target.value); setNameError(null); }}
+              onBlur={saveName}
+              onKeyDown={(e) => { if (e.key === "Enter") saveName(); if (e.key === "Escape") { setEditing(false); setNameError(null); setEditName(collection.name); } }}
+              autoFocus
+              style={{ background: "none", border: "none", borderBottom: `1px solid ${nameError ? "var(--danger, #e55)" : "var(--accent)"}`, borderRadius: 0, padding: "0 2px", width: "auto", fontSize: 15 }}
+            />
+            {nameError && <span style={{ fontSize: 11, color: "var(--danger, #e55)" }}>{nameError}</span>}
+          </div>
         ) : (
           <span className="card-title">{collection.name}</span>
         )}
@@ -110,6 +152,9 @@ function CollectionCard({ collection, videos, onChange, onDelete }) {
             {matched.length} video{matched.length !== 1 ? "s" : ""}
           </span>
           <button className="btn-icon" title="Rename" onClick={() => { setEditing(true); setExpanded(true); }}>✏️</button>
+          {matched.length > 0 && (
+            <button className="btn-icon" title="Set collection image" onClick={() => { setImageEditing(v => !v); setExpanded(true); }}>🖼</button>
+          )}
           <button className="btn-icon btn-danger" title="Delete collection" onClick={onDelete}>🗑</button>
           <span style={{ color: "var(--muted)", fontSize: 12 }}>{expanded ? "▲" : "▼"}</span>
         </div>
@@ -117,7 +162,23 @@ function CollectionCard({ collection, videos, onChange, onDelete }) {
 
       {expanded && (
         <div className="card-body">
-          <ThumbStrip videos={matched} />
+          {imageEditing && (
+            <div className="image-edit-row" onClick={(e) => e.stopPropagation()}>
+              <input
+                type="text"
+                value={editImageUrl}
+                onChange={(e) => setEditImageUrl(e.target.value)}
+                placeholder="https://…"
+                style={{ flex: 1 }}
+              />
+              {editImageUrl && (
+                <img src={editImageUrl} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+              )}
+              <button className="btn-primary btn-sm" onClick={saveImage}>Save</button>
+              <button className="btn-ghost btn-sm" onClick={clearImage}>Clear</button>
+            </div>
+          )}
+          <ThumbGrid videos={matched} />
 
           <div className="rules-toggle" onClick={() => setRulesOpen((v) => !v)}>
             <span className="rules-toggle-arrow">{rulesOpen ? "▲" : "▶"}</span>
@@ -150,13 +211,18 @@ function CollectionCard({ collection, videos, onChange, onDelete }) {
   );
 }
 
-function AddCollectionForm({ onAdd, onCancel }) {
+function AddCollectionForm({ onAdd, onCancel, existingNames }) {
   const [name, setName] = useState("");
+  const [nameError, setNameError] = useState(null);
 
   const submit = () => {
-    if (name.trim()) {
-      onAdd({ name: name.trim(), rules: [emptyRule()] });
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (existingNames.includes(trimmed)) {
+      setNameError(`"${trimmed}" already exists`);
+      return;
     }
+    onAdd({ name: trimmed, rules: [emptyRule()] });
   };
 
   return (
@@ -167,11 +233,13 @@ function AddCollectionForm({ onAdd, onCancel }) {
           <input
             type="text"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => { setName(e.target.value); setNameError(null); }}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onCancel(); }}
             placeholder="e.g. GoGo Penguin"
             autoFocus
+            style={nameError ? { borderColor: "var(--danger, #e55)" } : {}}
           />
+          {nameError && <span style={{ fontSize: 11, color: "var(--danger, #e55)" }}>{nameError}</span>}
         </div>
         <button className="btn-primary" onClick={submit} disabled={!name.trim()}>Add</button>
         <button className="btn-ghost" onClick={onCancel}>Cancel</button>
@@ -201,7 +269,7 @@ export default function Collections({ collections, videos, onChange }) {
       <h2>Collections</h2>
 
       {adding && (
-        <AddCollectionForm onAdd={addCollection} onCancel={() => setAdding(false)} />
+        <AddCollectionForm onAdd={addCollection} onCancel={() => setAdding(false)} existingNames={collections.map((c) => c.name)} />
       )}
 
       {collections.length === 0 && !adding && (
@@ -215,6 +283,7 @@ export default function Collections({ collections, videos, onChange }) {
           videos={videos}
           onChange={(updated) => updateAt(i, updated)}
           onDelete={() => deleteAt(i)}
+          otherNames={collections.filter((_, idx) => idx !== i).map((x) => x.name)}
         />
       ))}
 

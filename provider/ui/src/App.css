@@ -170,12 +170,21 @@ select option { background: var(--surface2); }
 .rules-toggle:hover { color: var(--text); }
 .rules-toggle-arrow { font-size: 10px; }
 
-/* Thumb strip inside collection cards */
-.thumb-strip {
-  display: flex; gap: 6px; overflow-x: auto;
-  padding: 8px 0 4px; scrollbar-width: thin;
+.image-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 4px;
 }
-.thumb-strip-item { flex: 0 0 auto; width: 100px; cursor: default; }
+
+/* Thumb grid inside collection cards */
+.thumb-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 100px);
+  gap: 6px;
+  padding: 8px 0 4px;
+}
+.thumb-strip-item { width: 100px; cursor: default; }
 .thumb-strip-item img { width: 100px; height: 56px; object-fit: cover; border-radius: 4px; display: block; }
 .thumb-strip-placeholder { width: 100px; height: 56px; background: var(--surface2); border-radius: 4px; }
 .thumb-title {

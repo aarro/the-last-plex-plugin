@@ -12,8 +12,9 @@ Plex deprecated their legacy Python plugin framework in 2026. This replaces the 
 
 - **Auto-metadata** from `.info.json`: title, description, upload date, duration, channel (as director), genres, thumbnail as poster art
 - **Collection rules** driven by tags, title substrings, or channel name
+- **Collection poster images** — set a URL in the UI and YAMP pushes it to Plex as the collection artwork on save
 - **Web UI** at `http://localhost:8765` to add/edit/delete collections and rules
-- **Unmatched tag suggestions** — surface the most frequent tags from unmatched videos and turn them into collections in one click
+- **Discover panel** — browse unmatched (or all) videos, search by title/channel/tag, click any tag to instantly create a collection from it
 - **Rescan button** — trigger a Plex metadata refresh directly from the UI
 - **Docker Compose** setup with Plex + MeTube + YAMP all sharing one volume
 

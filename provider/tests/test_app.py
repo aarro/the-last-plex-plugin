@@ -126,19 +126,31 @@ async def test_thumbnail_webp_mime_type(patched_app):
 
 
 async def test_thumbnail_no_local_file(patched_app):
+    """When no local file exists, the endpoint proxies the remote thumbnail URL."""
     _, info, tmp_path = patched_app
-    # Remove the thumbnail
     (tmp_path / f"{info['id']}.jpg").unlink()
-    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get(f"/api/thumbnail/{info['id']}")
-    assert resp.status_code == 404
+    fake_image = b"\xff\xd8\xff\xe0fake"
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = fake_image
+    mock_resp.headers = {"content-type": "image/jpeg"}
+    with patch("app.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client_cls.return_value = mock_client
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(f"/api/thumbnail/{info['id']}")
+    assert resp.status_code == 200
+    assert resp.content == fake_image
 
 
 async def test_thumbnail_path_containment(patched_app):
+    """A symlink escaping DATA_PATH is blocked; the endpoint falls back to proxying the remote URL."""
     import tempfile
 
     _, info, data_path = patched_app
-    # Create a file in a completely separate temp directory (genuinely outside DATA_PATH)
     with tempfile.TemporaryDirectory() as outside_dir:
         evil_file = Path(outside_dir) / "evil.jpg"
         evil_file.write_bytes(b"\xff\xd8\xff")
@@ -148,9 +160,59 @@ async def test_thumbnail_path_containment(patched_app):
         link.unlink()
         link.symlink_to(evil_file)
 
-        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        fake_image = b"\xff\xd8\xff\xe0safe"
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = fake_image
+        mock_resp.headers = {"content-type": "image/jpeg"}
+        with patch("app.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value = mock_client
+            async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.get(f"/api/thumbnail/{info['id']}")
+        # Must proxy the safe remote URL, not serve the evil symlinked file
+        assert resp.status_code == 200
+        assert resp.content == fake_image
+        assert resp.content != b"\xff\xd8\xff"
+
+
+async def test_thumbnail_upstream_non_200(patched_app):
+    """Upstream returns non-200 → YAMP returns 502."""
+    _, info, tmp_path = patched_app
+    (tmp_path / f"{info['id']}.jpg").unlink()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_client = _make_plex_mock(return_value=mock_resp)
+    # Create the test client BEFORE the patch so it isn't replaced by the mock
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
             resp = await client.get(f"/api/thumbnail/{info['id']}")
-    assert resp.status_code == 404
+    assert resp.status_code == 502
+
+
+async def test_thumbnail_upstream_timeout(patched_app):
+    """Upstream timeout → YAMP returns 504."""
+    _, info, tmp_path = patched_app
+    (tmp_path / f"{info['id']}.jpg").unlink()
+    mock_client = _make_plex_mock(side_effect=httpx.TimeoutException("timeout"))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.get(f"/api/thumbnail/{info['id']}")
+    assert resp.status_code == 504
+
+
+async def test_thumbnail_upstream_request_error(patched_app):
+    """Upstream network error → YAMP returns 502."""
+    _, info, tmp_path = patched_app
+    (tmp_path / f"{info['id']}.jpg").unlink()
+    mock_client = _make_plex_mock(side_effect=httpx.RequestError("err"))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.get(f"/api/thumbnail/{info['id']}")
+    assert resp.status_code == 502
 
 
 # ── /api/videos ───────────────────────────────────────────────────────────────
@@ -286,6 +348,112 @@ async def test_api_get_collections_corrupt_map(patched_app):
         resp = await client.get("/api/collections")
     assert resp.status_code == 500
     assert "Could not read collection map" in resp.json()["detail"]
+
+
+async def test_api_get_collections_plex_unreachable(patched_app, monkeypatch):
+    """Plex configured but _fetch_plex_collection_thumbs raises → 200 with plex_thumb_error, no 500."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text(
+        json.dumps({
+            "collections": [{"name": "Alt-J", "rules": []}],
+            "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    def _raise():
+        raise Exception("boom")
+
+    monkeypatch.setattr(yamp_app, "_fetch_plex_collection_thumbs", _raise)
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/collections")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["collections"][0]["plex_thumb"] is None
+    assert data.get("plex_thumb_error") is True
+
+
+# ── /api/plex-collection-thumb ────────────────────────────────────────────────
+
+
+async def test_plex_collection_thumb_no_plex_config(monkeypatch):
+    """PLEX_URL/PLEX_TOKEN not set → 404."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/plex-collection-thumb?path=/library/collections/42/thumb")
+    assert resp.status_code == 404
+
+
+async def test_plex_collection_thumb_valid_path(monkeypatch):
+    """Valid path → proxied image content returned."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    fake_img = b"\xff\xd8\xff\xe0plex"
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = fake_img
+    mock_resp.headers = {"content-type": "image/jpeg"}
+    mock_client = _make_plex_mock(return_value=mock_resp)
+    # Create the test client BEFORE the patch so it isn't replaced by the mock
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.get("/api/plex-collection-thumb?path=/library/collections/42/thumb")
+    assert resp.status_code == 200
+    assert resp.content == fake_img
+
+
+@pytest.mark.parametrize("path", [
+    "/library/collections/abc/thumb",       # non-numeric ID
+    "/library/collections/42/thumb/extra",  # trailing chars
+    "/library/collections/../etc/passwd",   # path traversal
+    "/library/collections/42/art",          # wrong endpoint
+    "",                                     # empty
+])
+async def test_plex_collection_thumb_invalid_paths(monkeypatch, path):
+    """Invalid paths → 400."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/plex-collection-thumb?path={path}")
+    assert resp.status_code == 400
+
+
+async def test_plex_collection_thumb_upstream_non_200(monkeypatch):
+    """Upstream Plex non-200 → 502."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 403
+    mock_client = _make_plex_mock(return_value=mock_resp)
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.get("/api/plex-collection-thumb?path=/library/collections/42/thumb")
+    assert resp.status_code == 502
+
+
+async def test_plex_collection_thumb_upstream_timeout(monkeypatch):
+    """Upstream timeout → 504."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_client = _make_plex_mock(side_effect=httpx.TimeoutException("timeout"))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.get("/api/plex-collection-thumb?path=/library/collections/42/thumb")
+    assert resp.status_code == 504
+
+
+async def test_plex_collection_thumb_upstream_request_error(monkeypatch):
+    """Upstream network error → 502."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_client = _make_plex_mock(side_effect=httpx.RequestError("err"))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.get("/api/plex-collection-thumb?path=/library/collections/42/thumb")
+    assert resp.status_code == 502
 
 
 # ── /api/plex/sections ────────────────────────────────────────────────────────
@@ -800,6 +968,19 @@ async def test_get_images_no_local_thumb_remote_fallback(patched_app, monkeypatc
     images = resp.json()["MediaContainer"]["Image"]
     assert len(images) == 1
     assert images[0]["url"] == info["thumbnail"]
+
+
+async def test_get_images_yamp_url_no_local_file(patched_app, monkeypatch):
+    """YAMP_URL set but no local thumbnail → still returns YAMP proxy URL (not YouTube URL)."""
+    _, info, tmp_path = patched_app
+    (tmp_path / f"{info['id']}.jpg").unlink()
+    monkeypatch.setattr(yamp_app, "YAMP_URL", "http://yamp.local:8765")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/movies/library/metadata/{info['id']}/images")
+    assert resp.status_code == 200
+    images = resp.json()["MediaContainer"]["Image"]
+    assert len(images) == 1
+    assert images[0]["url"] == f"http://yamp.local:8765/api/thumbnail/{info['id']}"
 
 
 async def test_get_images_no_thumbnail_at_all(patched_app):

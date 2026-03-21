@@ -52,6 +52,7 @@ button:disabled { opacity: .4; cursor: default; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .btn-icon { background: none; padding: 4px 8px; color: var(--muted); font-size: 16px; }
 .btn-icon:hover { color: var(--text); }
+.btn-icon.btn-danger { border: none; }
 
 /* Sections */
 section { margin-bottom: 40px; }
@@ -180,13 +181,13 @@ select option { background: var(--surface2); }
 /* Thumb grid inside collection cards */
 .thumb-grid {
   display: grid;
-  grid-template-columns: repeat(4, 100px);
+  grid-template-columns: repeat(5, 90px);
   gap: 6px;
   padding: 8px 0 4px;
 }
-.thumb-strip-item { width: 100px; cursor: default; }
-.thumb-strip-item img { width: 100px; height: 56px; object-fit: cover; border-radius: 4px; display: block; }
-.thumb-strip-placeholder { width: 100px; height: 56px; background: var(--surface2); border-radius: 4px; }
+.thumb-strip-item { width: 90px; cursor: default; }
+.thumb-strip-item img { width: 90px; height: 51px; object-fit: cover; border-radius: 4px; display: block; }
+.thumb-strip-placeholder { width: 90px; height: 51px; background: var(--surface2); border-radius: 4px; }
 .thumb-title {
   font-size: 10px; color: var(--muted);
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 2px;
@@ -205,6 +206,10 @@ select option { background: var(--surface2); }
 }
 .discover-thumb { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: var(--surface2); }
 .discover-info { padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; flex: 1; }
+
+/* Collections intro */
+.collections-intro { font-size: 13px; color: var(--muted); line-height: 1.5; margin-bottom: 14px; }
+.collections-intro strong { color: var(--text); }
 
 /* Misc */
 .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }

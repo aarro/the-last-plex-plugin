@@ -45,7 +45,7 @@ When Plex calls the match endpoint with a filename, `extract_video_id()` in `met
 1. **`GET /movies`** — Plex discovers the provider. Returns `MediaProvider` JSON with identifier `tv.plex.agents.custom.yamp`.
 2. **`POST /movies/library/metadata/matches`** — Plex sends `{filename, title, year}`. We extract the video ID, find the `.info.json`, and return a match stub.
 3. **`GET /movies/library/metadata/{rating_key}`** — Plex fetches full metadata. We read the `.info.json`, run collection matching, and return the full response.
-4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the thumbnail as `coverPoster`. Prefers a local file (`.jpg`/`.png`/`.webp`) alongside the `.info.json`; falls back to the YouTube URL from `thumbnail`.
+4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the thumbnail as `coverPoster`. When `YAMP_URL` is set, always returns `{YAMP_URL}/api/thumbnail/{video_id}` so Plex gets a YAMP-served URL (Plex can't reliably reach YouTube directly). Falls back to the YouTube URL from `thumbnail` if `YAMP_URL` is not configured.
 
 `rating_key` format: `youtube-{video_id}`.
 
@@ -103,9 +103,20 @@ Each collection can have an optional `image` URL. On `PUT /api/collections`, YAM
 3. Find the existing Plex collection by name, or create it by matching YAMP-tracked videos against the collection rules
 4. Call `plex_col.uploadPoster(url=image)` to set the poster
 
-The 🖼 button in the UI is only shown when a collection has matched videos — this ensures the create-collection path always has items to work with.
+The 📷 button in the UI is only shown when a collection has matched videos — this ensures the create-collection path always has items to work with.
 
-If `PLEX_URL` / `PLEX_TOKEN` are not set, artwork push is skipped silently. Failures are surfaced per-collection in the `PUT /api/collections` response and shown in the UI status bar.
+**Pre-populating from Plex:** `GET /api/collections` fetches existing collection poster paths from Plex (via `_fetch_plex_collection_thumbs()`) and includes a `plex_thumb` field per collection. Clicking 📷 on a collection that already has a poster in Plex (but no local `image` set) pre-populates the URL editor with the Plex poster, routed through `/api/plex-collection-thumb?path=…` so the Plex token never reaches the browser.
+
+If `PLEX_URL` / `PLEX_TOKEN` are not set, artwork push and `plex_thumb` fetch are skipped silently. Failures are surfaced per-collection in the `PUT /api/collections` response and shown in the UI status bar.
+
+### Thumbnail Proxy
+
+`GET /api/thumbnail/{video_id}` serves thumbnails to both the YAMP UI and (via the images endpoint) to Plex:
+
+1. If a local image file (`.jpg`/`.jpeg`/`.png`/`.webp`) exists alongside the `.info.json`, serve it directly via `FileResponse`.
+2. Otherwise, proxy the remote `thumbnail` URL from `info_json` via httpx — Plex can't reliably reach YouTube CDN directly.
+
+`GET /api/plex-collection-thumb?path=…` proxies Plex collection poster images server-side (keeps the Plex token out of the browser).
 
 ## Running Locally
 
@@ -156,13 +167,13 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 | `PLEX_TOKEN`         | —        | Your X-Plex-Token                    |
 | `PORT`               | `8765`   | Port the server listens on           |
 | `API_KEY`            | —        | Bearer token for write API endpoints (`PUT /api/collections`, `POST /api/rescan`, `POST /api/index/rebuild`). If unset, those endpoints are open (backward-compatible). |
-| `YAMP_URL`           | —        | Public URL of this YAMP instance (e.g. `http://192.168.1.10:8765`). Required for Plex to load local thumbnails. |
+| `YAMP_URL`           | —        | Public URL of this YAMP instance (e.g. `http://192.168.1.10:8765`). Required for Plex to load thumbnails — when set, all video thumbnails are proxied through YAMP rather than served as raw YouTube URLs. |
 
 ## Key Files
 
 - `provider/collection_map.py` — `match_video()`, `resolve_collections()`, `recompute_all_collections()`, `find_collection_map()`
 - `provider/metadata.py` — `extract_video_id()`, `build_metadata_response()`
-- `provider/app.py` — all FastAPI routes; `_sync_collection_artwork()`, `_find_matching_plex_items()`
+- `provider/app.py` — all FastAPI routes; `_sync_collection_artwork()`, `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, thumbnail proxy + Plex collection thumb proxy
 - `provider/ui/src/App.jsx` — React root, state management, save/rescan actions
 - `provider/ui/src/Collections.jsx` — collection editor (rules, name, poster image)
 - `provider/ui/src/DiscoverPanel.jsx` — video browser; click any tag to create a collection from it

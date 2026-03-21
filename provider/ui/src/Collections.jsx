@@ -44,7 +44,7 @@ function RuleForm({ rule, onChange, onRemove }) {
   );
 }
 
-const THUMB_PAGE = 4;
+const THUMB_PAGE = 5;
 
 function ThumbGrid({ videos }) {
   const [expanded, setExpanded] = useState(false);
@@ -76,7 +76,7 @@ function ThumbGrid({ videos }) {
   );
 }
 
-function CollectionCard({ collection, videos, onChange, onDelete, otherNames }) {
+function CollectionCard({ collection, videos, onChange, onDelete, otherNames, plexThumb }) {
   const [expanded, setExpanded] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [editName, setEditName] = useState(collection.name);
@@ -153,7 +153,11 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames }) 
           </span>
           <button className="btn-icon" title="Rename" onClick={() => { setEditing(true); setExpanded(true); }}>✏️</button>
           {matched.length > 0 && (
-            <button className="btn-icon" title="Set collection image" onClick={() => { setImageEditing(v => !v); setExpanded(true); }}>🖼</button>
+            <button className="btn-icon" title="Set collection image" onClick={() => {
+            if (!editImageUrl && plexThumb) setEditImageUrl(plexThumb);
+            setImageEditing(v => !v);
+            setExpanded(true);
+          }}>📷</button>
           )}
           <button className="btn-icon btn-danger" title="Delete collection" onClick={onDelete}>🗑</button>
           <span style={{ color: "var(--muted)", fontSize: 12 }}>{expanded ? "▲" : "▼"}</span>
@@ -264,9 +268,17 @@ export default function Collections({ collections, videos, onChange }) {
     setAdding(false);
   };
 
+  const sorted = collections.map((c, i) => ({ c, i })).sort((a, b) => a.c.name.localeCompare(b.c.name));
+
   return (
     <section>
       <h2>Collections</h2>
+      <p className="collections-intro">
+        Collections group videos from multiple channels, tags, or titles under one name in
+        Plex — great when an artist, show, or topic spans different uploaders or video names.
+        Add rules to define what matches; any video satisfying at least one rule joins the
+        collection. Hit <strong>Save Changes</strong> to apply rules and push artwork to Plex.
+      </p>
 
       {adding && (
         <AddCollectionForm onAdd={addCollection} onCancel={() => setAdding(false)} existingNames={collections.map((c) => c.name)} />
@@ -276,14 +288,15 @@ export default function Collections({ collections, videos, onChange }) {
         <p className="empty">No collections yet. Add one to get started.</p>
       )}
 
-      {collections.map((c, i) => (
+      {sorted.map(({ c, i }) => (
         <CollectionCard
-          key={i}
+          key={c.name}
           collection={c}
           videos={videos}
           onChange={(updated) => updateAt(i, updated)}
           onDelete={() => deleteAt(i)}
           otherNames={collections.filter((_, idx) => idx !== i).map((x) => x.name)}
+          plexThumb={c.plex_thumb}
         />
       ))}
 

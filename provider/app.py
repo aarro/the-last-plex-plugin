@@ -7,14 +7,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Literal, Optional
+from urllib.parse import quote
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
@@ -271,13 +273,41 @@ def _local_thumb_path(video_id: str) -> Path | None:
 
 @app.get("/api/thumbnail/{video_id}")
 async def api_thumbnail(video_id: str):
-    """Serve a local thumbnail image for a video."""
+    """Serve a thumbnail — local file if available, otherwise proxy from the remote URL."""
     if not _validate_video_id(video_id):
         raise HTTPException(status_code=404)
     thumb = _local_thumb_path(video_id)
-    if not thumb:
-        raise HTTPException(status_code=404, detail="No local thumbnail found")
-    return FileResponse(str(thumb), media_type=_THUMB_MIME.get(thumb.suffix.lower(), "image/jpeg"))
+    if thumb:
+        return FileResponse(str(thumb), media_type=_THUMB_MIME.get(thumb.suffix.lower(), "image/jpeg"))
+    # No local file — proxy the remote thumbnail so Plex always gets a YAMP-served URL
+    info_path = _video_index.get(video_id)
+    if not info_path:
+        raise HTTPException(status_code=404, detail="Video not found")
+    try:
+        with open(info_path, encoding="utf-8") as f:
+            info = json.load(f)
+    except OSError as e:
+        logger.error("api_thumbnail: could not read info_json for '%s' at '%s': %s", video_id, info_path, e)
+        raise HTTPException(status_code=500, detail=f"Could not read metadata for '{video_id}'")
+    except json.JSONDecodeError as e:
+        logger.error("api_thumbnail: corrupt info_json for '%s' at '%s': %s", video_id, info_path, e)
+        raise HTTPException(status_code=500, detail=f"Corrupt metadata for '{video_id}'")
+    thumb_url = info.get("thumbnail")
+    if not thumb_url:
+        raise HTTPException(status_code=404, detail="No thumbnail available")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), follow_redirects=True) as client:
+            resp = await client.get(thumb_url)
+    except httpx.TimeoutException:
+        logger.warning("api_thumbnail: timed out fetching thumbnail for '%s'", video_id)
+        raise HTTPException(status_code=504, detail="Thumbnail fetch timed out")
+    except httpx.RequestError as e:
+        logger.warning("api_thumbnail: network error fetching thumbnail for '%s': %s", video_id, e)
+        raise HTTPException(status_code=502, detail="Could not fetch thumbnail")
+    if resp.status_code != 200:
+        logger.warning("api_thumbnail: upstream returned HTTP %d for video '%s'", resp.status_code, video_id)
+        raise HTTPException(status_code=502, detail=f"Thumbnail upstream returned {resp.status_code}")
+    return Response(content=resp.content, media_type=resp.headers.get("content-type", "image/jpeg"))
 
 
 @app.get("/movies/library/metadata/{rating_key}/images")
@@ -291,8 +321,8 @@ async def get_images(rating_key: str):
     info_json = await _get_info_json(video_id)
     images = []
 
-    # Prefer local thumbnail served via YAMP (Plex can't always fetch remote URLs)
-    if _local_thumb_path(video_id) and YAMP_URL:
+    # Route through YAMP proxy when configured — Plex can't always reach YouTube directly
+    if YAMP_URL:
         images.append({"type": "coverPoster", "url": f"{YAMP_URL}/api/thumbnail/{video_id}"})
     elif thumb := info_json.get("thumbnail"):
         images.append({"type": "coverPoster", "url": thumb})
@@ -384,12 +414,29 @@ async def api_get_collections():
     except (OSError, ValueError) as e:
         logger.error("api_get_collections: failed to load collection map at '%s': %s", mapping_path, e)
         raise HTTPException(status_code=500, detail="Could not read collection map")
-    return {
-        "collections": data.get("collections", []),
+
+    plex_thumbs: dict[str, str] = {}
+    plex_thumb_error = False
+    if PLEX_URL and PLEX_TOKEN:
+        try:
+            plex_thumbs = await asyncio.to_thread(_fetch_plex_collection_thumbs)
+        except Exception as e:
+            logger.error("api_get_collections: unexpected error fetching Plex thumbs: %s", e)
+            plex_thumb_error = True
+
+    collections = [
+        {**col, "plex_thumb": plex_thumbs.get(col.get("name"))}
+        for col in data.get("collections", [])
+    ]
+    result: dict = {
+        "collections": collections,
         "unmatched_tags": data.get("unmatched_tags", {}),
         "matched_count": len(data.get("matched_ids", [])),
         "unmatched_count": len(data.get("unmatched_ids", [])),
     }
+    if plex_thumb_error:
+        result["plex_thumb_error"] = True
+    return result
 
 
 @app.put("/api/collections", dependencies=[Depends(_require_api_key)])
@@ -528,12 +575,48 @@ def _find_matching_plex_items(section, col_spec: list) -> list:
         try:
             with open(info_path, encoding="utf-8") as f:
                 info_json = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("_find_matching_plex_items: skipping '%s' at '%s': %s", video_id, info_path, e)
             continue
         matches, _ = match_video(info_json, col_spec)
         if matches:
             results.append(item)
     return results
+
+
+def _fetch_plex_collection_thumbs() -> dict[str, str]:
+    """Return {collection_name: relative proxy path} for all collections in YAMP-managed Plex sections.
+
+    Paths are relative (e.g. /api/plex-collection-thumb?path=…) so the Plex token
+    is never sent to the browser.
+    """
+    import requests.exceptions
+    from plexapi.exceptions import PlexApiException
+    from plexapi.server import PlexServer
+    try:
+        plex = PlexServer(PLEX_URL, PLEX_TOKEN)
+    except (PlexApiException, requests.exceptions.RequestException) as e:
+        logger.error("_fetch_plex_collection_thumbs: failed to connect to Plex at '%s': %s", PLEX_URL, e)
+        return {}
+    try:
+        sections = plex.library.sections()
+    except (PlexApiException, requests.exceptions.RequestException) as e:
+        logger.error("_fetch_plex_collection_thumbs: failed to fetch sections from Plex: %s", e)
+        return {}
+    thumbs: dict[str, str] = {}
+    for section in sections:
+        if section.agent != IDENTIFIER:
+            continue
+        try:
+            for col in section.collections():
+                if col.thumb:
+                    thumbs[col.title] = f"/api/plex-collection-thumb?path={quote(col.thumb)}"
+        except (PlexApiException, requests.exceptions.RequestException) as e:
+            logger.error(
+                "_fetch_plex_collection_thumbs: error fetching collections for section '%s': %s",
+                section.title, e,
+            )
+    return thumbs
 
 
 def _sync_collection_artwork(col: CollectionModel) -> dict:
@@ -579,6 +662,32 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
         return {"ok": True, "created": created, "error": None}
 
     return {"ok": False, "created": False, "error": "No YAMP sections processed"}
+
+
+_PLEX_THUMB_PATH_RE = re.compile(r"^/library/collections/\d+/thumb$")
+
+
+@app.get("/api/plex-collection-thumb")
+async def api_plex_collection_thumb(path: str):
+    """Proxy a Plex collection poster server-side so the Plex token never reaches the browser."""
+    if not PLEX_URL or not PLEX_TOKEN:
+        raise HTTPException(status_code=404)
+    if not _PLEX_THUMB_PATH_RE.match(path):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), follow_redirects=True) as client:
+            resp = await client.get(f"{PLEX_URL}{path}", headers={"X-Plex-Token": PLEX_TOKEN})
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Plex timed out")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Plex: {e}")
+    if resp.status_code != 200:
+        logger.warning(
+            "api_plex_collection_thumb: Plex returned HTTP %d for path '%s'",
+            resp.status_code, path,
+        )
+        raise HTTPException(status_code=502, detail=f"Plex returned {resp.status_code}")
+    return Response(content=resp.content, media_type=resp.headers.get("content-type", "image/jpeg"))
 
 
 @app.get("/api/plex/sections")

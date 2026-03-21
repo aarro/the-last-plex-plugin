@@ -375,7 +375,7 @@ async def test_match_happy_path(patched_app):
     assert resp.status_code == 200
     results = resp.json()["MediaContainer"]["Metadata"]
     assert len(results) == 1
-    assert results[0]["ratingKey"] == f"youtube-{info['id']}"
+    assert results[0]["ratingKey"] == info["id"]
     assert results[0]["type"] == "movie"
     assert results[0]["title"] == info["title"]
 
@@ -409,7 +409,7 @@ async def test_match_parent_dir_fallback(patched_app):
     assert resp.status_code == 200
     results = resp.json()["MediaContainer"]["Metadata"]
     assert len(results) == 1
-    assert results[0]["ratingKey"] == f"youtube-{info['id']}"
+    assert results[0]["ratingKey"] == info["id"]
 
 
 async def test_match_stem_index_fallback(patched_app, monkeypatch):
@@ -421,33 +421,32 @@ async def test_match_stem_index_fallback(patched_app, monkeypatch):
     assert resp.status_code == 200
     results = resp.json()["MediaContainer"]["Metadata"]
     assert len(results) == 1
-    assert results[0]["ratingKey"] == f"youtube-{info['id']}"
+    assert results[0]["ratingKey"] == info["id"]
 
 
 async def test_get_metadata_happy_path(patched_app):
-    """Valid rating_key returns full metadata with correct title and year."""
+    """Valid video ID returns full metadata with correct title and year."""
     _, info, _ = patched_app
-    rating_key = f"youtube-{info['id']}"
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get(f"/movies/library/metadata/{rating_key}")
+        resp = await client.get(f"/movies/library/metadata/{info['id']}")
     assert resp.status_code == 200
     meta = resp.json()["MediaContainer"]["Metadata"][0]
     assert meta["title"] == info["title"]
     assert meta["year"] == 2023  # upload_date "20231015"
-    assert meta["ratingKey"] == rating_key
+    assert meta["ratingKey"] == info["id"]
 
 
-async def test_get_metadata_non_youtube_prefix(patched_app):
-    """rating_key not starting with 'youtube-' → 404."""
+async def test_get_metadata_invalid_id(patched_app):
+    """rating_key that isn't a valid video ID format → 404."""
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/movies/library/metadata/imdb-tt1234567")
     assert resp.status_code == 404
 
 
 async def test_get_metadata_unknown_id(patched_app):
-    """Valid prefix but unknown video ID → 404."""
+    """Valid ID format but not in index → 404."""
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/movies/library/metadata/youtube-aaaaaaaaaaa")
+        resp = await client.get("/movies/library/metadata/aaaaaaaaaaa")
     assert resp.status_code == 404
 
 
@@ -464,9 +463,8 @@ async def test_get_metadata_resolve_collections_failure(patched_app, monkeypatch
 
     monkeypatch.setattr(yamp_app, "resolve_collections", _fail)
 
-    rating_key = f"youtube-{info['id']}"
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get(f"/movies/library/metadata/{rating_key}")
+        resp = await client.get(f"/movies/library/metadata/{info['id']}")
     assert resp.status_code == 200
     meta = resp.json()["MediaContainer"]["Metadata"][0]
     assert meta["title"] == info["title"]

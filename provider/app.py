@@ -225,14 +225,13 @@ async def match(request: Request):
         logger.warning("Missing upload_date or title in info_json for video ID: %s", video_id)
         return JSONResponse(_media_container([]))
 
-    rating_key = f"youtube-{video_id}"
     upload_date = parse_upload_date(upload_date_raw)
 
     return JSONResponse(
         _media_container([
             {
-                "ratingKey": rating_key,
-                "key": f"{METADATA_KEY}/{rating_key}",
+                "ratingKey": video_id,
+                "key": f"{METADATA_KEY}/{video_id}",
                 "guid": f"{IDENTIFIER}://movie/{video_id}",
                 "type": "movie",
                 "title": title,
@@ -276,9 +275,7 @@ async def api_thumbnail(video_id: str):
 @app.get("/movies/library/metadata/{rating_key}/images")
 async def get_images(rating_key: str):
     """Images endpoint — return poster/backdrop URLs for a video."""
-    if not rating_key.startswith("youtube-"):
-        raise HTTPException(status_code=404)
-    video_id = rating_key[len("youtube-"):]
+    video_id = rating_key
     if not _validate_video_id(video_id):
         raise HTTPException(status_code=404)
 
@@ -304,9 +301,7 @@ async def get_images(rating_key: str):
 @app.get("/movies/library/metadata/{rating_key}")
 async def get_metadata(rating_key: str):
     """Full metadata endpoint — called after a successful match."""
-    if not rating_key.startswith("youtube-"):
-        raise HTTPException(status_code=404)
-    video_id = rating_key[len("youtube-"):]
+    video_id = rating_key
     if not _validate_video_id(video_id):
         raise HTTPException(status_code=404)
 

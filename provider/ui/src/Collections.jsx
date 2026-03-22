@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const FIELDS = ["tags", "title", "channel", "uploader", "categories", "description", "extractor"];
 const MATCHES = ["exact", "in"];
@@ -59,16 +59,12 @@ function RuleForm({ rule, onChange, onRemove }) {
   );
 }
 
-const THUMB_PAGE = 5;
+const THUMB_PAGE = 4;
 
 function ThumbGrid({ videos }) {
   const [expanded, setExpanded] = useState(false);
   if (videos.length === 0) {
-    return (
-      <p className="empty" style={{ paddingTop: 8 }}>
-        No videos matched yet.
-      </p>
-    );
+    return <p className="empty thumb-grid-empty">No videos matched yet.</p>;
   }
   const shown = expanded ? videos : videos.slice(0, THUMB_PAGE);
   const hidden = videos.length - THUMB_PAGE;
@@ -87,12 +83,7 @@ function ThumbGrid({ videos }) {
         ))}
       </div>
       {videos.length > THUMB_PAGE && (
-        <button
-          type="button"
-          className="btn-ghost btn-sm"
-          style={{ marginTop: 6 }}
-          onClick={() => setExpanded((v) => !v)}
-        >
+        <button type="button" className="btn-ghost btn-sm thumb-grid-toggle" onClick={() => setExpanded((v) => !v)}>
           {expanded ? "Show fewer ▲" : `Show ${hidden} more ▼`}
         </button>
       )}
@@ -107,11 +98,21 @@ function isAbsoluteUrl(url) {
 function CollectionCard({ collection, videos, onChange, onDelete, otherNames, plexThumb }) {
   const [expanded, setExpanded] = useState(false);
   const [editName, setEditName] = useState(collection.name);
-  const [editing, setEditing] = useState(false);
   const [nameError, setNameError] = useState(null);
   const [imageEditing, setImageEditing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   const savedImage = isAbsoluteUrl(collection.image) ? collection.image : null;
   const [editImageUrl, setEditImageUrl] = useState(savedImage || "");
+  const posterSrc = savedImage || plexThumb;
+
+  useEffect(() => {
+    setEditName(collection.name);
+  }, [collection.name]);
+
+  useEffect(() => {
+    setEditImageUrl(isAbsoluteUrl(collection.image) ? collection.image : "");
+  }, [collection.image]);
 
   const matched = videos.filter((v) => v.collections.includes(collection.name));
 
@@ -132,7 +133,7 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
   const saveName = () => {
     const trimmed = editName.trim();
     if (!trimmed) {
-      setEditing(false);
+      setEditName(collection.name);
       return;
     }
     if (otherNames.includes(trimmed)) {
@@ -141,7 +142,6 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
     }
     setNameError(null);
     onChange({ ...collection, name: trimmed });
-    setEditing(false);
   };
 
   const saveImage = () => {
@@ -156,13 +156,50 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
     setImageEditing(false);
   };
 
-  const toggleExpanded = () => setExpanded((v) => !v);
+  const toggleExpanded = () => {
+    if (expanded) {
+      setImageEditing(false);
+      setConfirmDelete(false);
+    }
+    setExpanded((v) => !v);
+  };
+
+  const handlePosterClick = (e) => {
+    e.stopPropagation();
+    if (expanded) {
+      setImageEditing((v) => !v);
+    } else {
+      toggleExpanded();
+    }
+  };
+
+  const handlePosterKey = (e) => {
+    if (e.key === "Enter" || e.key === " ") handlePosterClick(e);
+  };
 
   return (
-    <div className="card">
-      {/* biome-ignore lint/a11y/useSemanticElements: contains nested buttons so cannot itself be a <button> */}
+    <div className={`card${expanded ? " card--expanded" : ""}`}>
+      {/* Left column: poster/thumbnail — toggles expand when collapsed, image editor when expanded */}
+      {/* biome-ignore lint/a11y/useSemanticElements: poster is interactive in two different modes depending on expanded state */}
       <div
-        className="card-header"
+        className="card-poster-col"
+        role="button"
+        tabIndex={0}
+        onClick={handlePosterClick}
+        onKeyDown={handlePosterKey}
+        aria-label={expanded ? "Change collection image" : `Expand ${collection.name}`}
+        title={expanded ? "Change collection image" : `Expand ${collection.name}`}
+      >
+        <div className="card-poster-inner">
+          {posterSrc ? <img src={posterSrc} alt="" className="card-poster-img" /> : <div className="card-poster-ph" />}
+          {expanded && <div className="card-poster-overlay">Change Image</div>}
+        </div>
+      </div>
+
+      {/* Right column row 1: header — always visible, toggles expand */}
+      {/* biome-ignore lint/a11y/useSemanticElements: contains nested interactive content in body */}
+      <div
+        className="card-header-right"
         role="button"
         tabIndex={0}
         onClick={toggleExpanded}
@@ -170,94 +207,20 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
           if (e.key === "Enter" || e.key === " ") toggleExpanded();
         }}
       >
-        {(savedImage || plexThumb) && (
-          <img
-            src={savedImage || plexThumb}
-            alt=""
-            style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
-          />
-        )}
-        {editing ? (
-          // biome-ignore lint/a11y/noStaticElementInteractions: stops propagation to parent role=button only
-          <div
-            style={{ display: "flex", flexDirection: "column", gap: 2 }}
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => e.stopPropagation()}
-          >
-            <input
-              type="text"
-              className="card-title"
-              value={editName}
-              onChange={(e) => {
-                setEditName(e.target.value);
-                setNameError(null);
-              }}
-              onBlur={saveName}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") saveName();
-                if (e.key === "Escape") {
-                  setEditing(false);
-                  setNameError(null);
-                  setEditName(collection.name);
-                }
-              }}
-              autoFocus
-              style={{
-                background: "none",
-                border: "none",
-                borderBottom: `1px solid ${nameError ? "var(--danger, #e55)" : "var(--accent)"}`,
-                borderRadius: 0,
-                padding: "0 2px",
-                width: "auto",
-                fontSize: 15,
-              }}
-            />
-            {nameError && <span style={{ fontSize: 11, color: "var(--danger, #e55)" }}>{nameError}</span>}
-          </div>
-        ) : (
-          <span className="card-title">{collection.name}</span>
-        )}
-        {/* biome-ignore lint/a11y/noStaticElementInteractions: stops propagation to parent role=button only */}
-        <div className="card-actions" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-          <span style={{ fontSize: 12, color: "var(--muted)" }}>
-            {matched.length} video{matched.length !== 1 ? "s" : ""}
-          </span>
-          <button
-            type="button"
-            className="btn-icon"
-            title="Rename"
-            onClick={() => {
-              setEditing(true);
-              setExpanded(true);
-            }}
-          >
-            ✏️
-          </button>
-          {matched.length > 0 && (
-            <button
-              type="button"
-              className="btn-icon"
-              title="Set collection image"
-              onClick={() => {
-                setImageEditing((v) => !v);
-                setExpanded(true);
-              }}
-            >
-              📷
-            </button>
-          )}
-          <button type="button" className="btn-icon btn-danger" title="Delete collection" onClick={onDelete}>
-            🗑
-          </button>
-          <span style={{ color: "var(--muted)", fontSize: 12 }}>{expanded ? "▲" : "▼"}</span>
-        </div>
+        <span className="card-title">{collection.name}</span>
+        <span className="card-count">
+          {matched.length} video{matched.length !== 1 ? "s" : ""}
+          <span>{expanded ? " ▲" : " ▼"}</span>
+        </span>
       </div>
 
+      {/* Right column row 2: body — only when expanded */}
       {expanded && (
-        <div className="card-body">
+        // biome-ignore lint/a11y/noStaticElementInteractions: stops propagation to parent role=button
+        <div className="card-body" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+          {/* Image URL editor — shown when poster is clicked */}
           {imageEditing && (
-            // biome-ignore lint/a11y/noStaticElementInteractions: stops propagation to parent role=button only
-            <div className="image-edit-row" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+            <div className="image-edit-row">
               <input
                 type="text"
                 value={editImageUrl}
@@ -266,11 +229,7 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
                 style={{ flex: 1 }}
               />
               {(editImageUrl || plexThumb) && (
-                <img
-                  src={editImageUrl || plexThumb}
-                  alt=""
-                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
-                />
+                <img src={editImageUrl || plexThumb} alt="" className="image-edit-preview" />
               )}
               <button type="button" className="btn-primary btn-sm" onClick={saveImage}>
                 Save
@@ -280,8 +239,31 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
               </button>
             </div>
           )}
+
+          {/* Name editing */}
+          <div className="form-group">
+            <label>
+              Name
+              <input
+                type="text"
+                value={editName}
+                onChange={(e) => {
+                  setEditName(e.target.value);
+                  setNameError(null);
+                }}
+                onBlur={saveName}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") saveName();
+                }}
+              />
+            </label>
+            {nameError && <span className="field-error">{nameError}</span>}
+          </div>
+
+          {/* Matched video thumbnails */}
           <ThumbGrid videos={matched} />
 
+          {/* Rules */}
           {collection.rules.length === 0 && <p className="empty">No rules — add one below.</p>}
           <div className="rules">
             {collection.rules.map((rule, i) => (
@@ -291,6 +273,24 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
           <button type="button" className="btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={addRule}>
             + Add Rule
           </button>
+
+          {/* Delete with two-step confirmation */}
+          <div className="card-delete-row">
+            {confirmDelete ? (
+              <>
+                <button type="button" className="btn-danger btn-sm" onClick={onDelete}>
+                  Confirm delete
+                </button>
+                <button type="button" className="btn-ghost btn-sm" onClick={() => setConfirmDelete(false)}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button type="button" className="btn-danger btn-sm" onClick={() => setConfirmDelete(true)}>
+                ✕ Delete collection
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -330,9 +330,9 @@ function AddCollectionForm({ onAdd, onCancel, existingNames }) {
               }}
               placeholder="e.g. GoGo Penguin"
               autoFocus
-              style={nameError ? { borderColor: "var(--danger, #e55)" } : {}}
+              className={nameError ? "input-error" : undefined}
             />
-            {nameError && <span style={{ fontSize: 11, color: "var(--danger, #e55)" }}>{nameError}</span>}
+            {nameError && <span className="field-error">{nameError}</span>}
           </label>
         </div>
         <button type="button" className="btn-primary" onClick={submit} disabled={!name.trim()}>
@@ -374,14 +374,6 @@ export default function Collections({ collections, videos, onChange }) {
         Plex.
       </p>
 
-      {adding && (
-        <AddCollectionForm
-          onAdd={addCollection}
-          onCancel={() => setAdding(false)}
-          existingNames={collections.map((c) => c.name)}
-        />
-      )}
-
       {collections.length === 0 && !adding && <p className="empty">No collections yet. Add one to get started.</p>}
 
       {sorted.map(({ c, i }) => (
@@ -396,7 +388,13 @@ export default function Collections({ collections, videos, onChange }) {
         />
       ))}
 
-      {!adding && (
+      {adding ? (
+        <AddCollectionForm
+          onAdd={addCollection}
+          onCancel={() => setAdding(false)}
+          existingNames={collections.map((c) => c.name)}
+        />
+      ) : (
         <button type="button" className="btn-ghost" style={{ marginTop: 4 }} onClick={() => setAdding(true)}>
           + Add Collection
         </button>

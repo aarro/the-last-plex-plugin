@@ -2,7 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import Collections from "./Collections.jsx";
 import DiscoverPanel from "./DiscoverPanel.jsx";
 
-const API = "";
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
+  if (!res.ok) throw new Error(await res.text());
+  try {
+    return await res.json();
+  } catch {
+    throw new Error("Server returned invalid response");
+  }
+}
 
 export default function App() {
   const [data, setData] = useState(null);
@@ -14,7 +22,7 @@ export default function App() {
   const [fixingThumbs, setFixingThumbs] = useState(false);
 
   const load = useCallback(async () => {
-    const [colRes, vidRes] = await Promise.all([fetch(`${API}/api/collections`), fetch(`${API}/api/videos`)]);
+    const [colRes, vidRes] = await Promise.all([fetch("/api/collections"), fetch("/api/videos")]);
     setData(await colRes.json());
     setVideos((await vidRes.json()).videos ?? []);
     setDirty(false);
@@ -33,18 +41,11 @@ export default function App() {
     setSaving(true);
     setStatus(null);
     try {
-      const res = await fetch(`${API}/api/collections`, {
+      const result = await fetchJson("/api/collections", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ collections: data.collections }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      let result;
-      try {
-        result = await res.json();
-      } catch {
-        throw new Error("Server returned invalid response");
-      }
       const artworkFails = Object.entries(result.artwork ?? {})
         .filter(([, v]) => !v.ok)
         .map(([k]) => k);
@@ -64,14 +65,7 @@ export default function App() {
     setRescanning(true);
     setStatus(null);
     try {
-      const res = await fetch(`${API}/api/rescan`, { method: "POST" });
-      if (!res.ok) throw new Error(await res.text());
-      let json;
-      try {
-        json = await res.json();
-      } catch {
-        throw new Error("Server returned invalid response");
-      }
+      const json = await fetchJson("/api/rescan", { method: "POST" });
       const n = json.triggered_sections?.length ?? 0;
       if (n > 0) {
         setStatus({ type: "ok", msg: "Plex rescan triggered." });
@@ -89,14 +83,7 @@ export default function App() {
     setFixingThumbs(true);
     setStatus(null);
     try {
-      const res = await fetch(`${API}/api/thumbnails/fix`, { method: "POST" });
-      if (!res.ok) throw new Error(await res.text());
-      let json;
-      try {
-        json = await res.json();
-      } catch {
-        throw new Error("Server returned invalid response");
-      }
+      const json = await fetchJson("/api/thumbnails/fix", { method: "POST" });
       const msg = `Thumbnails fixed: ${json.fixed} updated, ${json.failed} failed, ${json.skipped} skipped.`;
       setStatus({ type: json.failed > 0 ? "err" : "ok", msg });
     } catch (e) {
@@ -116,7 +103,7 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <img src="/logo.svg" alt="YAMP" height="40" style={{ display: "block" }} />
+        <img src="/logo.svg" alt="YAMP" height="40" className="header-logo" />
         <div className="stats">
           <div className="stat">
             <div className="stat-value">{data.matched_count}</div>

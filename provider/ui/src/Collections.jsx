@@ -7,6 +7,12 @@ function emptyRule() {
   return { field: "tags", values: [], match: "exact" };
 }
 
+/** Prevents click/key events from bubbling to the parent card toggle. */
+const stopBubble = {
+  onClick: (e) => e.stopPropagation(),
+  onKeyDown: (e) => e.stopPropagation(),
+};
+
 function RuleForm({ rule, onChange, onRemove }) {
   const [rawValues, setRawValues] = useState(rule.values.join(", "));
 
@@ -216,87 +222,86 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
 
       {/* Right column row 2: body — only when expanded */}
       {expanded && (
-        // biome-ignore lint/a11y/noStaticElementInteractions: stops propagation to parent role=button
-        <div className="card-body" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-          {/* Image URL editor — shown when poster is clicked */}
-          {imageEditing && (
-            <div className="image-edit-row">
-              <input
-                type="text"
-                value={editImageUrl}
-                onChange={(e) => setEditImageUrl(e.target.value)}
-                placeholder="https://…"
-                style={{ flex: 1 }}
-              />
-              {(editImageUrl || plexThumb) && (
-                <img src={editImageUrl || plexThumb} alt="" className="image-edit-preview" />
-              )}
-              <button type="button" className="btn-primary btn-sm" onClick={saveImage}>
-                Save
-              </button>
-              <button type="button" className="btn-ghost btn-sm" onClick={clearImage}>
-                Clear
-              </button>
-            </div>
-          )}
-
-          {/* Name editing */}
-          <div className="form-group">
-            <label>
-              Name
-              <input
-                type="text"
-                value={editName}
-                onChange={(e) => {
-                  setEditName(e.target.value);
-                  setNameError(null);
-                }}
-                onBlur={saveName}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") saveName();
-                }}
-              />
-            </label>
-            {nameError && <span className="field-error">{nameError}</span>}
-          </div>
-
-          {/* Matched video thumbnails */}
-          <ThumbGrid videos={matched} />
-
-          {/* Rules */}
-          {collection.rules.length === 0 && <p className="empty">No rules — add one below.</p>}
-          <div className="rules">
-            {collection.rules.map((rule, i) => (
-              <RuleForm key={i} rule={rule} onChange={(r) => updateRule(i, r)} onRemove={() => removeRule(i)} />
-            ))}
-          </div>
-          <button
-            type="button"
-            className="btn-ghost btn-sm"
-            style={{ marginTop: 10, display: "block", marginLeft: "auto" }}
-            onClick={addRule}
-          >
-            + Add Rule
-          </button>
-
-          {/* Delete with two-step confirmation */}
-          <div className="card-delete-row">
-            {confirmDelete ? (
-              <>
-                <button type="button" className="btn-danger btn-sm" onClick={onDelete}>
-                  Confirm delete
+        <>
+          {/* Right col row 2: name + thumbs alongside image */}
+          <div className="card-body-top" {...stopBubble}>
+            {/* Image URL editor — shown when poster is clicked */}
+            {imageEditing && (
+              <div className="image-edit-row">
+                <input
+                  type="text"
+                  value={editImageUrl}
+                  onChange={(e) => setEditImageUrl(e.target.value)}
+                  placeholder="https://…"
+                  className="image-edit-input"
+                />
+                {(editImageUrl || plexThumb) && (
+                  <img src={editImageUrl || plexThumb} alt="" className="image-edit-preview" />
+                )}
+                <button type="button" className="btn-primary btn-sm" onClick={saveImage}>
+                  Save
                 </button>
-                <button type="button" className="btn-ghost btn-sm" onClick={() => setConfirmDelete(false)}>
-                  Cancel
+                <button type="button" className="btn-ghost btn-sm" onClick={clearImage}>
+                  Clear
                 </button>
-              </>
-            ) : (
-              <button type="button" className="btn-danger btn-sm" onClick={() => setConfirmDelete(true)}>
-                ✕ Delete collection
-              </button>
+              </div>
             )}
+
+            {/* Name editing */}
+            <div className="form-group">
+              <label>
+                Name
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => {
+                    setEditName(e.target.value);
+                    setNameError(null);
+                  }}
+                  onBlur={saveName}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveName();
+                  }}
+                />
+              </label>
+              {nameError && <span className="field-error">{nameError}</span>}
+            </div>
+
+            {/* Matched video thumbnails */}
+            <ThumbGrid videos={matched} />
           </div>
-        </div>
+
+          {/* Full-width row 3: rules + actions */}
+          <div className="card-body-bottom" {...stopBubble}>
+            {collection.rules.length === 0 && <p className="empty">No rules — add one below.</p>}
+            <div className="rules">
+              {collection.rules.map((rule, i) => (
+                <RuleForm key={i} rule={rule} onChange={(r) => updateRule(i, r)} onRemove={() => removeRule(i)} />
+              ))}
+            </div>
+            <button type="button" className="btn-ghost btn-sm add-rule-btn" onClick={addRule}>
+              + Add Rule
+            </button>
+
+            {/* Delete with two-step confirmation */}
+            <div className="card-delete-row">
+              {confirmDelete ? (
+                <>
+                  <button type="button" className="btn-danger btn-sm" onClick={onDelete}>
+                    Confirm delete
+                  </button>
+                  <button type="button" className="btn-ghost btn-sm" onClick={() => setConfirmDelete(false)}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button type="button" className="btn-danger btn-sm" onClick={() => setConfirmDelete(true)}>
+                  ✕ Delete collection
+                </button>
+              )}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
@@ -332,8 +337,7 @@ function AddCollectionForm({ onAdd, onCancel, existingNames }) {
           }}
           placeholder="New collection name, e.g. GoGo Penguin"
           autoFocus
-          className={nameError ? "input-error" : undefined}
-          style={{ flex: 1 }}
+          className={nameError ? "form-row-input input-error" : "form-row-input"}
         />
         <button type="button" className="btn-primary" onClick={submit} disabled={!name.trim()}>
           Add
@@ -396,7 +400,7 @@ export default function Collections({ collections, videos, onChange }) {
           existingNames={collections.map((c) => c.name)}
         />
       ) : (
-        <button type="button" className="btn-ghost" style={{ marginTop: 4 }} onClick={() => setAdding(true)}>
+        <button type="button" className="btn-ghost add-collection-btn" onClick={() => setAdding(true)}>
           + Add Collection
         </button>
       )}

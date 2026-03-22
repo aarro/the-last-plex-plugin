@@ -53,6 +53,9 @@ header {
   padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
 }
+.header-logo {
+  display: block;
+}
 
 .stats {
   display: flex;
@@ -112,18 +115,6 @@ button:disabled {
 .btn-sm {
   padding: 4px 10px;
   font-size: 12px;
-}
-.btn-icon {
-  background: none;
-  padding: 4px 8px;
-  color: var(--muted);
-  font-size: 16px;
-}
-.btn-icon:hover {
-  color: var(--text);
-}
-.btn-icon.btn-danger {
-  border: none;
 }
 
 /* Sections */
@@ -225,11 +216,19 @@ section h2 {
   white-space: nowrap;
 }
 
-/* Right column row 2: body */
-.card-body {
+/* Right column row 2: body (name + thumbs, alongside image) */
+.card-body-top {
   grid-column: 2;
   padding: 12px 16px 16px;
 }
+
+/* Full-width row 3: rules + actions */
+.card-body-bottom {
+  grid-column: 1 / -1;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border);
+}
+
 .card-delete-row {
   display: flex;
   gap: 8px;
@@ -239,49 +238,11 @@ section h2 {
   justify-content: flex-end;
 }
 
-/* Rules list */
 .rules {
   margin-top: 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-.rule {
-  background: var(--surface2);
-  border-radius: 8px;
-  padding: 10px 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.rule-info {
-  flex: 1;
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  flex-wrap: wrap;
-}
-.badge {
-  background: var(--border);
-  border-radius: 4px;
-  padding: 2px 7px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-}
-.rule-values {
-  font-size: 13px;
-  color: var(--muted);
-}
-.rule-values code {
-  color: var(--text);
-  background: var(--border);
-  border-radius: 3px;
-  padding: 1px 5px;
-  font-size: 12px;
 }
 
 /* Forms */
@@ -331,6 +292,16 @@ select option {
 .rule-form .form-group {
   margin-bottom: 0;
 }
+.add-rule-btn {
+  margin-top: 10px;
+  display: block;
+  margin-left: auto;
+}
+.rule-form input[type="text"],
+.rule-form select {
+  border-color: var(--muted);
+  background: var(--bg);
+}
 
 .add-collection-form {
   background: var(--surface);
@@ -348,37 +319,11 @@ select option {
   flex: 1;
   margin-bottom: 0;
 }
-
-/* Unmatched tags */
-.tags-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.form-row-input {
+  flex: 1;
 }
-.tag-chip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 5px 12px;
-  font-size: 13px;
-}
-.tag-chip .count {
-  color: var(--accent);
-  font-weight: 700;
-  font-size: 12px;
-}
-.tag-chip button {
-  background: none;
-  color: var(--muted);
-  padding: 0;
-  font-size: 13px;
-  border-radius: 0;
-}
-.tag-chip button:hover {
-  color: var(--accent);
+.add-collection-btn {
+  margin-top: 4px;
 }
 
 /* Action bar */
@@ -407,35 +352,7 @@ select option {
   color: var(--danger);
 }
 
-/* Video grid */
-.video-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 12px;
-  margin-top: 4px;
-}
-.video-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-.video-thumb {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-  display: block;
-  background: var(--surface2);
-}
-.video-info {
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex: 1;
-}
+/* Video elements */
 .video-title {
   font-size: 13px;
   font-weight: 600;
@@ -506,6 +423,9 @@ select option {
   gap: 8px;
   padding: 8px 0 4px;
 }
+.image-edit-input {
+  flex: 1;
+}
 .image-edit-preview {
   width: 40px;
   height: 40px;
@@ -563,7 +483,20 @@ select option {
   margin-top: 2px;
 }
 
-/* Discover panel grid */
+/* Discover panel */
+.discover-search {
+  margin-bottom: 10px;
+}
+.discover-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.discover-result-count {
+  font-size: 12px;
+  color: var(--muted);
+}
 .discover-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -609,11 +542,6 @@ select option {
   color: var(--muted);
   font-size: 13px;
   padding: 12px 0;
-}
-.divider {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 12px 0;
 }
 
 /* Toast notification */

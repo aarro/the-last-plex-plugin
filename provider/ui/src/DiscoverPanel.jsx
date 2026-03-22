@@ -51,10 +51,10 @@ export default function DiscoverPanel({ videos }) {
         placeholder="Search title, channel, or tags…"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
-        style={{ width: "100%", marginBottom: 10 }}
+        className="discover-search"
       />
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+      <div className="discover-filters">
         <button
           type="button"
           className={!showAll ? "btn-primary btn-sm" : "btn-ghost btn-sm"}
@@ -70,7 +70,7 @@ export default function DiscoverPanel({ videos }) {
           All ({videos.length})
         </button>
         {search && (
-          <span style={{ fontSize: 12, color: "var(--muted)" }}>
+          <span className="discover-result-count">
             {filtered.length} result{filtered.length !== 1 ? "s" : ""}
           </span>
         )}
@@ -119,14 +119,9 @@ export default function DiscoverPanel({ videos }) {
                           {tag}
                         </button>
                       ))}
-                      {!tagsExpanded && hiddenCount > 0 && (
+                      {hiddenCount > 0 && (
                         <button type="button" className="tag-more" onClick={() => toggleTags(v.id)}>
-                          +{hiddenCount} more
-                        </button>
-                      )}
-                      {tagsExpanded && tags.length > 5 && (
-                        <button type="button" className="tag-more" onClick={() => toggleTags(v.id)}>
-                          show less
+                          {tagsExpanded ? "show less" : `+${hiddenCount} more`}
                         </button>
                       )}
                     </div>

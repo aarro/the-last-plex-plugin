@@ -12,7 +12,7 @@ Plex deprecated their legacy Python plugin framework in 2026. This replaces the 
 
 - **Auto-metadata** from `.info.json`: title, description, upload date, duration, channel (as director), genres, thumbnail as poster art
 - **Multi-platform support** — indexes videos from YouTube, Bilibili, and any other yt-dlp extractor; ID detection is regex-based with a JSON fallback for non-standard filename templates
-- **Thumbnail proxy** — YAMP serves all video thumbnails; proxies the remote URL when no local file exists. `YAMP_URL` is optional — omit it if Plex has direct internet access
+- **Thumbnail proxy** — YAMP always serves thumbnails through its own proxy; local files first, remote URL as fallback. No `YAMP_URL` needed — YAMP derives its own address from each incoming request
 - **Collection rules** driven by tags, title substrings, or channel name
 - **Collection poster images** — set a URL in the UI and YAMP pushes it to Plex as the collection artwork on save; existing Plex posters are pre-loaded when you open the editor
 - **Fast saves** — collection matching uses an in-memory metadata cache (no disk I/O); image/name-only edits skip recompute entirely; Plex artwork sync and rescan run in the background so saves return immediately
@@ -38,7 +38,6 @@ cd the-last-plex-plugin
 
 # 1. Edit provider/docker-compose.yml — set the youtube-data volume device path
 # 2. Create provider/.env with PLEX_URL, PLEX_TOKEN, PLEX_CLAIM
-#    Optional: set YAMP_URL if Plex can't reach external CDNs directly
 
 make docker-up
 ```

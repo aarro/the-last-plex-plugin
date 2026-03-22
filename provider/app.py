@@ -386,21 +386,21 @@ async def api_thumbnail(video_id: str):
 
 
 @app.get("/movies/library/metadata/{rating_key}/images")
-async def get_images(rating_key: str):
+async def get_images(rating_key: str, request: Request):
     """Images endpoint — return poster/backdrop URLs for a video."""
     video_id = rating_key
     if not _validate_video_id(video_id):
         logger.warning("get_images: invalid video ID format: %r", video_id)
         raise HTTPException(status_code=404)
 
-    info_json = await _get_info_json(video_id)
+    await _get_info_json(video_id)
     images = []
 
-    # Route through YAMP proxy when configured — Plex can't always reach YouTube directly
-    if YAMP_URL:
-        images.append({"type": "coverPoster", "url": f"{YAMP_URL}/api/thumbnail/{video_id}"})
-    elif thumb := info_json.get("thumbnail"):
-        images.append({"type": "coverPoster", "url": thumb})
+    # Always proxy through YAMP — derive our own URL from the incoming request so
+    # YAMP_URL doesn't need to be set.  Plex already knows this URL (it's how it
+    # called us), so we just reflect it back.
+    base = (YAMP_URL or str(request.base_url).rstrip("/"))
+    images.append({"type": "coverPoster", "url": f"{base}/api/thumbnail/{video_id}"})
 
     return JSONResponse(
         {
@@ -924,6 +924,7 @@ def _fix_all_thumbnails(
     meta_cache: dict[str, dict] | None = None,
     video_index: dict[str, str] | None = None,
     stem_index: dict[str, str] | None = None,
+    self_url: str = "",
 ) -> dict:
     """Upload YAMP-proxied thumbnails for every video in YAMP-managed Plex sections.
 
@@ -971,8 +972,8 @@ def _fix_all_thumbnails(
             if not (has_local or has_youtube):
                 skipped += 1
                 continue
-            if YAMP_URL:
-                thumb_url = f"{YAMP_URL}/api/thumbnail/{video_id}"
+            if self_url:
+                thumb_url = f"{self_url}/api/thumbnail/{video_id}"
             else:
                 thumb_url = ((meta_cache or {}).get(video_id) or {}).get("thumbnail") or ""
                 if not thumb_url:
@@ -991,14 +992,15 @@ def _fix_all_thumbnails(
 
 
 @app.post("/api/thumbnails/fix", dependencies=[Depends(_require_api_key)])
-async def api_fix_thumbnails():
+async def api_fix_thumbnails(request: Request):
     """Push YAMP-proxied thumbnails to Plex for all videos in YAMP-managed libraries."""
     if not PLEX_URL or not PLEX_TOKEN:
         raise HTTPException(status_code=400, detail="PLEX_URL and PLEX_TOKEN env vars not set")
     cache = _video_meta_cache  # capture refs before thread dispatch
     index = _video_index
     si = _stem_index
-    result = await asyncio.to_thread(_fix_all_thumbnails, cache, index, si)
+    base = YAMP_URL or str(request.base_url).rstrip("/")
+    result = await asyncio.to_thread(_fix_all_thumbnails, cache, index, si, base)
     if "error" in result:
         raise HTTPException(status_code=502, detail=result["error"])
     return result

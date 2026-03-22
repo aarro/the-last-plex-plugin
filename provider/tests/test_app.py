@@ -1037,7 +1037,7 @@ async def test_get_images_local_thumb_with_yamp_url(patched_app, monkeypatch):
 
 
 async def test_get_images_local_thumb_without_yamp_url(patched_app, monkeypatch):
-    """Local thumbnail but no YAMP_URL → falls back to remote thumbnail from info_json."""
+    """No YAMP_URL → URL derived from request.base_url (always proxy through YAMP)."""
     _, info, _ = patched_app
     monkeypatch.setattr(yamp_app, "YAMP_URL", "")
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1046,11 +1046,11 @@ async def test_get_images_local_thumb_without_yamp_url(patched_app, monkeypatch)
     images = resp.json()["MediaContainer"]["Image"]
     assert len(images) == 1
     assert images[0]["type"] == "coverPoster"
-    assert images[0]["url"] == info["thumbnail"]
+    assert images[0]["url"] == f"http://test/api/thumbnail/{info['id']}"
 
 
 async def test_get_images_no_local_thumb_remote_fallback(patched_app, monkeypatch):
-    """No local thumbnail → falls back to remote thumbnail URL from info_json."""
+    """No local thumbnail, no YAMP_URL → still returns YAMP proxy URL from request.base_url."""
     _, info, tmp_path = patched_app
     (tmp_path / f"{info['id']}.jpg").unlink()
     monkeypatch.setattr(yamp_app, "YAMP_URL", "")
@@ -1059,7 +1059,7 @@ async def test_get_images_no_local_thumb_remote_fallback(patched_app, monkeypatc
     assert resp.status_code == 200
     images = resp.json()["MediaContainer"]["Image"]
     assert len(images) == 1
-    assert images[0]["url"] == info["thumbnail"]
+    assert images[0]["url"] == f"http://test/api/thumbnail/{info['id']}"
 
 
 async def test_get_images_yamp_url_no_local_file(patched_app, monkeypatch):
@@ -1076,7 +1076,7 @@ async def test_get_images_yamp_url_no_local_file(patched_app, monkeypatch):
 
 
 async def test_get_images_no_thumbnail_at_all(patched_app):
-    """No local file and no thumbnail field → empty Image list."""
+    """No local file and no thumbnail field → still returns YAMP proxy URL; proxy handles 404."""
     _, info, tmp_path = patched_app
     (tmp_path / f"{info['id']}.jpg").unlink()
     info_no_thumb = {k: v for k, v in info.items() if k != "thumbnail"}
@@ -1084,4 +1084,6 @@ async def test_get_images_no_thumbnail_at_all(patched_app):
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get(f"/movies/library/metadata/{info['id']}/images")
     assert resp.status_code == 200
-    assert resp.json()["MediaContainer"]["Image"] == []
+    images = resp.json()["MediaContainer"]["Image"]
+    assert len(images) == 1
+    assert images[0]["url"] == f"http://test/api/thumbnail/{info['id']}"

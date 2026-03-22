@@ -52,7 +52,7 @@ For files with no bracket-wrapped ID in the filename at all (e.g. non-standard y
 1. **`GET /movies`** — Plex discovers the provider. Returns `MediaProvider` JSON with identifier `tv.plex.agents.custom.yamp`.
 2. **`POST /movies/library/metadata/matches`** — Plex sends `{filename, title, year}`. We extract the video ID, find the `.info.json`, and return a match stub.
 3. **`GET /movies/library/metadata/{rating_key}`** — Plex fetches full metadata. We read the `.info.json`, run collection matching, and return the full response.
-4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the thumbnail as `coverPoster`. When `YAMP_URL` is set, returns `{YAMP_URL}/api/thumbnail/{video_id}` so Plex loads thumbnails through YAMP's proxy (useful when Plex can't reach external CDNs). Falls back to the raw `thumbnail` URL from `info_json` when `YAMP_URL` is not set.
+4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the thumbnail as `coverPoster` via YAMP's proxy. The URL is derived from the incoming request (`request.base_url`) so Plex always loads thumbnails through YAMP — no `YAMP_URL` env var needed. `YAMP_URL` overrides this only for reverse-proxy setups.
 
 `rating_key` format: bare `{video_id}` (e.g. `dQw4w9WgXcQ`).
 
@@ -189,7 +189,7 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 | `PLEX_TOKEN`         | —        | Your X-Plex-Token                    |
 | `PORT`               | `8765`   | Port the server listens on           |
 | `API_KEY`            | —        | Bearer token for write API endpoints (`PUT /api/collections`, `POST /api/rescan`, `POST /api/thumbnails/fix`, `POST /api/index/rebuild`). If unset, those endpoints are open (backward-compatible). |
-| `YAMP_URL`           | —        | Public URL of this YAMP instance (e.g. `http://192.168.1.10:8765`). When set, all video thumbnails are proxied through YAMP rather than served as raw external URLs. Useful when Plex can't reach the external CDN directly; optional if Plex has direct internet access. |
+| `YAMP_URL`           | —        | Override for YAMP's own base URL. Normally not needed — YAMP derives its URL from the incoming request (Plex already knows it). Set this only if YAMP is behind a reverse proxy that rewrites the `Host` header. |
 
 ## Key Files
 

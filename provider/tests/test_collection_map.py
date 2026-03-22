@@ -2,9 +2,7 @@ import json
 import shutil
 from pathlib import Path
 
-import pytest
-
-from collection_map import match_video, find_collection_map, recompute_all_collections, resolve_collections
+from collection_map import find_collection_map, match_video, recompute_all_collections, resolve_collections
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

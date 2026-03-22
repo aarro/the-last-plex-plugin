@@ -11,7 +11,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Literal
 from urllib.parse import quote
 
 import httpx
@@ -20,7 +20,14 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
-from collection_map import match_video, find_collection_map, load_map, recompute_all_collections, resolve_collections, save_map
+from collection_map import (
+    find_collection_map,
+    load_map,
+    match_video,
+    recompute_all_collections,
+    resolve_collections,
+    save_map,
+)
 from metadata import (
     _BILIBILI_ID_RE,
     _YOUTUBE_ID_RE,
@@ -49,7 +56,7 @@ MATCH_KEY = "/library/metadata/matches"
 # Maps video_id → absolute path to its .info.json file
 
 _video_index: dict[str, str] = {}
-_stem_index: dict[str, str] = {}   # info.json filename stem → video_id (match endpoint fallback)
+_stem_index: dict[str, str] = {}  # info.json filename stem → video_id (match endpoint fallback)
 _last_rebuild: float = 0.0
 _REBUILD_COOLDOWN = 60.0
 
@@ -167,7 +174,7 @@ def _require_api_key(request: Request) -> None:
     if not API_KEY:
         return
     auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer ") or auth[len("Bearer "):] != API_KEY:
+    if not auth.startswith("Bearer ") or auth[len("Bearer ") :] != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 
@@ -260,17 +267,19 @@ async def match(request: Request):
         return JSONResponse(_media_container([]))
 
     return JSONResponse(
-        _media_container([
-            {
-                "ratingKey": video_id,
-                "key": f"{METADATA_KEY}/{video_id}",
-                "guid": f"{IDENTIFIER}://movie/{video_id}",
-                "type": "movie",
-                "title": title,
-                "year": upload_date.year,
-                "originallyAvailableAt": upload_date.isoformat(),
-            }
-        ])
+        _media_container(
+            [
+                {
+                    "ratingKey": video_id,
+                    "key": f"{METADATA_KEY}/{video_id}",
+                    "guid": f"{IDENTIFIER}://movie/{video_id}",
+                    "type": "movie",
+                    "title": title,
+                    "year": upload_date.year,
+                    "originallyAvailableAt": upload_date.isoformat(),
+                }
+            ]
+        )
     )
 
 
@@ -310,22 +319,22 @@ async def api_thumbnail(video_id: str):
             info = json.load(f)
     except OSError as e:
         logger.error("api_thumbnail: could not read info_json for '%s' at '%s': %s", video_id, info_path, e)
-        raise HTTPException(status_code=500, detail=f"Could not read metadata for '{video_id}'")
+        raise HTTPException(status_code=500, detail=f"Could not read metadata for '{video_id}'") from e
     except json.JSONDecodeError as e:
         logger.error("api_thumbnail: corrupt info_json for '%s' at '%s': %s", video_id, info_path, e)
-        raise HTTPException(status_code=500, detail=f"Corrupt metadata for '{video_id}'")
+        raise HTTPException(status_code=500, detail=f"Corrupt metadata for '{video_id}'") from e
     thumb_url = info.get("thumbnail")
     if not thumb_url:
         raise HTTPException(status_code=404, detail="No thumbnail available")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), follow_redirects=True) as client:
             resp = await client.get(thumb_url)
-    except httpx.TimeoutException:
+    except httpx.TimeoutException as e:
         logger.warning("api_thumbnail: timed out fetching thumbnail for '%s'", video_id)
-        raise HTTPException(status_code=504, detail="Thumbnail fetch timed out")
+        raise HTTPException(status_code=504, detail="Thumbnail fetch timed out") from e
     except httpx.RequestError as e:
         logger.warning("api_thumbnail: network error fetching thumbnail for '%s': %s", video_id, e)
-        raise HTTPException(status_code=502, detail="Could not fetch thumbnail")
+        raise HTTPException(status_code=502, detail="Could not fetch thumbnail") from e
     if resp.status_code != 200:
         logger.warning("api_thumbnail: upstream returned HTTP %d for video '%s'", resp.status_code, video_id)
         raise HTTPException(status_code=502, detail=f"Thumbnail upstream returned {resp.status_code}")
@@ -349,14 +358,16 @@ async def get_images(rating_key: str):
     elif thumb := info_json.get("thumbnail"):
         images.append({"type": "coverPoster", "url": thumb})
 
-    return JSONResponse({
-        "MediaContainer": {
-            "offset": 0,
-            "totalSize": len(images),
-            "size": len(images),
-            "Image": images,
+    return JSONResponse(
+        {
+            "MediaContainer": {
+                "offset": 0,
+                "totalSize": len(images),
+                "size": len(images),
+                "Image": images,
+            }
         }
-    })
+    )
 
 
 @app.get("/movies/library/metadata/{rating_key}")
@@ -377,12 +388,14 @@ async def get_metadata(rating_key: str):
         except OSError as e:
             logger.error(
                 "resolve_collections failed for '%s' (I/O error, collection state not persisted): %s",
-                video_id, e,
+                video_id,
+                e,
             )
         except ValueError as e:
             logger.error(
                 "resolve_collections failed for '%s' (invalid data in collection map): %s",
-                video_id, e,
+                video_id,
+                e,
             )
     logger.info("get_metadata: '%s' → collections=%s", video_id, collections)
 
@@ -400,21 +413,21 @@ async def get_metadata(rating_key: str):
 class RuleModel(BaseModel):
     field: str
     match: Literal["exact", "in"]
-    values: List[str]
+    values: list[str]
 
 
 class CollectionModel(BaseModel):
     name: str
-    rules: List[RuleModel]
-    image: Optional[str] = None
+    rules: list[RuleModel]
+    image: str | None = None
 
 
 class CollectionsBody(BaseModel):
-    collections: List[CollectionModel]
+    collections: list[CollectionModel]
 
     @field_validator("collections")
     @classmethod
-    def names_are_unique(cls, v: List[CollectionModel]) -> List[CollectionModel]:
+    def names_are_unique(cls, v: list[CollectionModel]) -> list[CollectionModel]:
         names = [c.name for c in v]
         if len(names) != len(set(names)):
             raise ValueError("Collection names must be unique")
@@ -435,7 +448,7 @@ async def api_get_collections():
         data = load_map(mapping_path)
     except (OSError, ValueError) as e:
         logger.error("api_get_collections: failed to load collection map at '%s': %s", mapping_path, e)
-        raise HTTPException(status_code=500, detail="Could not read collection map")
+        raise HTTPException(status_code=500, detail="Could not read collection map") from e
 
     plex_thumbs: dict[str, str] = {}
     plex_thumb_error = False
@@ -446,10 +459,7 @@ async def api_get_collections():
             logger.error("api_get_collections: unexpected error fetching Plex thumbs: %s", e)
             plex_thumb_error = True
 
-    collections = [
-        {**col, "plex_thumb": plex_thumbs.get(col.get("name"))}
-        for col in data.get("collections", [])
-    ]
+    collections = [{**col, "plex_thumb": plex_thumbs.get(col.get("name"))} for col in data.get("collections", [])]
     result: dict = {
         "collections": collections,
         "unmatched_tags": data.get("unmatched_tags", {}),
@@ -481,7 +491,10 @@ async def api_put_collections(body: CollectionsBody):
         stats = await asyncio.to_thread(recompute_all_collections, _video_index, mapping_path)
     except (OSError, ValueError) as e:
         logger.error("api_put_collections: recompute failed: %s", e)
-        raise HTTPException(status_code=500, detail="Collections saved but recompute failed — trigger a rescan to retry")
+        raise HTTPException(
+            status_code=500,
+            detail="Collections saved but recompute failed — trigger a rescan to retry",
+        ) from e
 
     artwork: dict = {}
     if PLEX_URL and PLEX_TOKEN:
@@ -526,16 +539,18 @@ def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> t
             logger.warning("api_videos: unparseable upload_date %r for %s — omitting date", upload_date_raw, video_id)
             upload_date = ""
 
-        videos.append({
-            "id": video_id,
-            "title": info_json.get("title", ""),
-            "channel": info_json.get("channel", "") or info_json.get("uploader", ""),
-            "thumbnail": thumbnail,
-            "upload_date": upload_date,
-            "collections": c_matches,
-            "matched": bool(c_matches),
-            "tags": info_json.get("tags", []),
-        })
+        videos.append(
+            {
+                "id": video_id,
+                "title": info_json.get("title", ""),
+                "channel": info_json.get("channel", "") or info_json.get("uploader", ""),
+                "thumbnail": thumbnail,
+                "upload_date": upload_date,
+                "collections": c_matches,
+                "matched": bool(c_matches),
+                "tags": info_json.get("tags", []),
+            }
+        )
 
     videos.sort(key=lambda v: v["upload_date"], reverse=True)
     return videos, skipped_ids
@@ -570,14 +585,14 @@ async def _fetch_plex_sections(client: httpx.AsyncClient) -> list[dict]:
         resp = await client.get(f"{PLEX_URL}/library/sections", headers=plex_headers)
         resp.raise_for_status()
         data = resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Plex server timed out")
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail="Plex server timed out") from e
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Plex returned {e.response.status_code}")
+        raise HTTPException(status_code=502, detail=f"Plex returned {e.response.status_code}") from e
     except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Could not reach Plex: {e}")
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        raise HTTPException(status_code=502, detail="Plex returned unexpected response format")
+        raise HTTPException(status_code=503, detail=f"Could not reach Plex: {e}") from e
+    except (json.JSONDecodeError, AttributeError, TypeError) as e:
+        raise HTTPException(status_code=502, detail="Plex returned unexpected response format") from e
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="Plex returned unexpected response format")
     return data.get("MediaContainer", {}).get("Directory", [])
@@ -615,6 +630,7 @@ def _fetch_plex_collection_thumbs() -> dict[str, str]:
     import requests.exceptions
     from plexapi.exceptions import PlexApiException
     from plexapi.server import PlexServer
+
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
     except (PlexApiException, requests.exceptions.RequestException) as e:
@@ -636,15 +652,16 @@ def _fetch_plex_collection_thumbs() -> dict[str, str]:
         except (PlexApiException, requests.exceptions.RequestException) as e:
             logger.error(
                 "_fetch_plex_collection_thumbs: error fetching collections for section '%s': %s",
-                section.title, e,
+                section.title,
+                e,
             )
     return thumbs
 
 
 def _sync_collection_artwork(col: CollectionModel) -> dict:
     """Ensure `col` exists in Plex and upload its poster. Synchronous — call via asyncio.to_thread."""
-    from plexapi.server import PlexServer
     from plexapi.exceptions import NotFound
+    from plexapi.server import PlexServer
 
     if not col.image:
         return {"ok": False, "created": False, "error": "no image set"}
@@ -666,7 +683,7 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
         except NotFound:
             items = _find_matching_plex_items(section, col_spec)
             if not items:
-                return {"ok": False, "created": False, "error": f"'{col.name}' not in Plex and no matching videos found"}
+                return {"ok": False, "created": False, "error": f"'{col.name}' not in Plex and no matched videos found"}
             try:
                 plex_col = plex.createCollection(title=col.name, section=section, items=items)
                 created = True
@@ -686,9 +703,7 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
     return {"ok": False, "created": False, "error": "No YAMP sections processed"}
 
 
-_PLEX_THUMB_PATH_RE = re.compile(
-    r"^/library/(collections|metadata)/\d+/(thumb|composite)(/\d+(\?[a-zA-Z0-9=&]+)?)?$"
-)
+_PLEX_THUMB_PATH_RE = re.compile(r"^/library/(collections|metadata)/\d+/(thumb|composite)(/\d+(\?[a-zA-Z0-9=&]+)?)?$")
 
 
 @app.get("/api/plex-collection-thumb")
@@ -701,14 +716,15 @@ async def api_plex_collection_thumb(path: str):
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), follow_redirects=True) as client:
             resp = await client.get(f"{PLEX_URL}{path}", headers={"X-Plex-Token": PLEX_TOKEN})
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Plex timed out")
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail="Plex timed out") from e
     except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach Plex: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not reach Plex: {e}") from e
     if resp.status_code != 200:
         logger.warning(
             "api_plex_collection_thumb: Plex returned HTTP %d for path '%s'",
-            resp.status_code, path,
+            resp.status_code,
+            path,
         )
         raise HTTPException(status_code=502, detail=f"Plex returned {resp.status_code}")
     return Response(content=resp.content, media_type=resp.headers.get("content-type", "image/jpeg"))

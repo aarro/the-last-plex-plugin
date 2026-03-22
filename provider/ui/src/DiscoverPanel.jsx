@@ -41,12 +41,14 @@ export default function DiscoverPanel({ videos, onAddToCollection }) {
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <button
+          type="button"
           className={!showAll ? "btn-primary btn-sm" : "btn-ghost btn-sm"}
           onClick={() => setShowAll(false)}
         >
           Unmatched ({unmatchedCount})
         </button>
         <button
+          type="button"
           className={showAll ? "btn-primary btn-sm" : "btn-ghost btn-sm"}
           onClick={() => setShowAll(true)}
         >
@@ -71,11 +73,11 @@ export default function DiscoverPanel({ videos, onAddToCollection }) {
 
             return (
               <div key={v.id} className="discover-card">
-                {v.thumbnail && (
-                  <img src={v.thumbnail} alt="" className="discover-thumb" loading="lazy" />
-                )}
+                {v.thumbnail && <img src={v.thumbnail} alt="" className="discover-thumb" loading="lazy" />}
                 <div className="discover-info">
-                  <div className="video-title" title={v.title}>{v.title}</div>
+                  <div className="video-title" title={v.title}>
+                    {v.title}
+                  </div>
                   <div className="video-meta">
                     <span>{v.channel}</span>
                     {v.upload_date && <span>{v.upload_date}</span>}
@@ -83,31 +85,34 @@ export default function DiscoverPanel({ videos, onAddToCollection }) {
                   {v.collections.length > 0 && (
                     <div className="video-collections">
                       {v.collections.map((c) => (
-                        <span key={c} className="collection-badge">{c}</span>
+                        <span key={c} className="collection-badge">
+                          {c}
+                        </span>
                       ))}
                     </div>
                   )}
                   {tags.length > 0 && (
                     <div className="video-tags">
                       {visibleTags.map((tag) => (
-                        <span
+                        <button
                           key={tag}
+                          type="button"
                           className="tag-chip-sm"
                           title={`Add collection rule for "${tag}"`}
                           onClick={() => onAddToCollection?.(tag)}
                         >
                           {tag}
-                        </span>
+                        </button>
                       ))}
                       {!tagsExpanded && hiddenCount > 0 && (
-                        <span className="tag-more" onClick={() => toggleTags(v.id)}>
+                        <button type="button" className="tag-more" onClick={() => toggleTags(v.id)}>
                           +{hiddenCount} more
-                        </span>
+                        </button>
                       )}
                       {tagsExpanded && tags.length > 5 && (
-                        <span className="tag-more" onClick={() => toggleTags(v.id)}>
+                        <button type="button" className="tag-more" onClick={() => toggleTags(v.id)}>
                           show less
-                        </span>
+                        </button>
                       )}
                     </div>
                   )}

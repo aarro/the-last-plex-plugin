@@ -2,7 +2,7 @@
 name = "yamp"
 version = "0.1.0"
 description = "YouTube Auto Metadata Provider — a Plex Custom Metadata Provider for yt-dlp downloads"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
@@ -15,8 +15,33 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.28",
+    "ruff>=0.9",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes (unused imports/vars)
+    "I",     # isort
+    "UP",    # pyupgrade (Optional→|, List→list, etc.)
+    "ASYNC", # flake8-async best practices
+    "SIM",   # flake8-simplify
+    "B",     # flake8-bugbear
+]
+ignore = [
+    "SIM108",  # ternary operator — sometimes less readable
+    "ASYNC230", # blocking open() in async fn — intentional (fast local file reads)
+    "ASYNC240", # os.path in async fn — intentional (fast local filesystem checks)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "collection_map", "metadata"]

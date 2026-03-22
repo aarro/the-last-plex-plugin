@@ -19,16 +19,19 @@ def _load_info() -> dict:
 # ── extract_video_id ──────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("filename,expected", [
-    ("GoGo Penguin - Live [dQw4w9WgXcQ].mp4", "dQw4w9WgXcQ"),
-    ("GoGo Penguin - Live [dQw4w9WgXcQ].info.json", "dQw4w9WgXcQ"),
-    ("Some_Video_Title [abc123defgh].webm", "abc123defgh"),
-    # Bilibili
-    ("Some Bilibili Video [BV1464y1s7aG].mp4", "BV1464y1s7aG"),
-    # No ID → None
-    ("plain-filename.mp4", None),
-    ("no_brackets_at_all.mp4", None),
-])
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        ("GoGo Penguin - Live [dQw4w9WgXcQ].mp4", "dQw4w9WgXcQ"),
+        ("GoGo Penguin - Live [dQw4w9WgXcQ].info.json", "dQw4w9WgXcQ"),
+        ("Some_Video_Title [abc123defgh].webm", "abc123defgh"),
+        # Bilibili
+        ("Some Bilibili Video [BV1464y1s7aG].mp4", "BV1464y1s7aG"),
+        # No ID → None
+        ("plain-filename.mp4", None),
+        ("no_brackets_at_all.mp4", None),
+    ],
+)
 def test_extract_video_id(filename, expected):
     assert extract_video_id(filename) == expected
 
@@ -74,9 +77,7 @@ def test_guid_format():
 
 def test_collections_populated():
     info = _load_info()
-    result = build_metadata_response(
-        info, ["GoGo Penguin", "Jazz"], "youtube-dQw4w9WgXcQ", IDENTIFIER, METADATA_KEY
-    )
+    result = build_metadata_response(info, ["GoGo Penguin", "Jazz"], "youtube-dQw4w9WgXcQ", IDENTIFIER, METADATA_KEY)
     assert {"tag": "GoGo Penguin"} in result["Collection"]
     assert {"tag": "Jazz"} in result["Collection"]
 

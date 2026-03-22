@@ -6,7 +6,6 @@ triggering the lifespan (which requires a real DATA_PATH directory).
 """
 
 import json
-import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -69,8 +68,8 @@ def test_build_index_filename_id_takes_priority(tmp_path):
     """When both filename and parent directory have IDs, the filename ID wins."""
     from app import build_index
 
-    file_id = "fileIDabcde"   # 11 chars
-    dir_id  = "dirIDvwxyz1"   # 11 chars
+    file_id = "fileIDabcde"  # 11 chars
+    dir_id = "dirIDvwxyz1"  # 11 chars
     video_dir = tmp_path / f"Video [{dir_id}]"
     video_dir.mkdir()
     info_file = video_dir / f"Video [{file_id}].info.json"
@@ -322,12 +321,14 @@ async def test_api_get_collections_happy_path(patched_app):
     """Map exists → returns collections, counts, and unmatched_tags."""
     _, _, tmp_path = patched_app
     (tmp_path / "_collection_map.json").write_text(
-        json.dumps({
-            "collections": [{"name": "Alt-J", "rules": []}],
-            "matched_ids": ["a", "b"],
-            "unmatched_ids": ["c"],
-            "unmatched_tags": {"jazz": 3},
-        }),
+        json.dumps(
+            {
+                "collections": [{"name": "Alt-J", "rules": []}],
+                "matched_ids": ["a", "b"],
+                "unmatched_ids": ["c"],
+                "unmatched_tags": {"jazz": 3},
+            }
+        ),
         encoding="utf-8",
     )
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -354,10 +355,14 @@ async def test_api_get_collections_plex_unreachable(patched_app, monkeypatch):
     """Plex configured but _fetch_plex_collection_thumbs raises → 200 with plex_thumb_error, no 500."""
     _, _, tmp_path = patched_app
     (tmp_path / "_collection_map.json").write_text(
-        json.dumps({
-            "collections": [{"name": "Alt-J", "rules": []}],
-            "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {},
-        }),
+        json.dumps(
+            {
+                "collections": [{"name": "Alt-J", "rules": []}],
+                "matched_ids": [],
+                "unmatched_ids": [],
+                "unmatched_tags": {},
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
@@ -405,24 +410,30 @@ async def test_plex_collection_thumb_valid_path(monkeypatch):
     assert resp.content == fake_img
 
 
-@pytest.mark.parametrize("path", [
-    "/library/collections/42/thumb",
-    "/library/collections/2348/composite/1730728751",
-    "/library/collections/2348/composite/1730728751?width=400&height=600",
-    "/library/metadata/2376/thumb/1730839921",
-])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/library/collections/42/thumb",
+        "/library/collections/2348/composite/1730728751",
+        "/library/collections/2348/composite/1730728751?width=400&height=600",
+        "/library/metadata/2376/thumb/1730839921",
+    ],
+)
 def test_plex_thumb_path_re_valid(path):
     """Regex accepts all Plex-observed thumb path shapes."""
     assert yamp_app._PLEX_THUMB_PATH_RE.match(path)
 
 
-@pytest.mark.parametrize("path", [
-    "/library/collections/abc/thumb",       # non-numeric ID
-    "/library/collections/42/thumb/extra",  # trailing non-numeric segment
-    "/library/collections/../etc/passwd",   # path traversal
-    "/library/collections/42/art",          # wrong endpoint
-    "",                                     # empty
-])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/library/collections/abc/thumb",  # non-numeric ID
+        "/library/collections/42/thumb/extra",  # trailing non-numeric segment
+        "/library/collections/../etc/passwd",  # path traversal
+        "/library/collections/42/art",  # wrong endpoint
+        "",  # empty
+    ],
+)
 async def test_plex_collection_thumb_invalid_paths(monkeypatch, path):
     """Invalid paths → 400."""
     monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
@@ -571,10 +582,12 @@ async def test_api_put_collections_duplicate_names(patched_app):
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
     )
-    body = {"collections": [
-        {"name": "Dup", "rules": []},
-        {"name": "Dup", "rules": []},
-    ]}
+    body = {
+        "collections": [
+            {"name": "Dup", "rules": []},
+            {"name": "Dup", "rules": []},
+        ]
+    }
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.put("/api/collections", json=body)
     assert resp.status_code == 422

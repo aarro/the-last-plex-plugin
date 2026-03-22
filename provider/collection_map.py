@@ -81,7 +81,11 @@ def match_video(info_json: dict, collections: list[dict]) -> tuple[list[str], se
             if not field_name or not match_type or not rule_values_raw:
                 continue
             if match_type not in ("exact", "in"):
-                logger.warning("match_video: unknown match_type %r in collection '%s' rule — skipping", match_type, c_name)
+                logger.warning(
+                    "match_video: unknown match_type %r in collection '%s' rule — skipping",
+                    match_type,
+                    c_name,
+                )
                 continue
             if field_name not in info_json:
                 continue
@@ -105,10 +109,9 @@ def match_video(info_json: dict, collections: list[dict]) -> tuple[list[str], se
                     collection_matches.append(c_name)
                     tags -= matched
                     break
-            elif match_type == "exact" and rule_values & set(v_values):
-                collection_matches.append(c_name)
-                break
-            elif match_type == "in" and any(rv in iv for rv in rule_values for iv in v_values):
+            elif (match_type == "exact" and rule_values & set(v_values)) or (
+                match_type == "in" and any(rv in iv for rv in rule_values for iv in v_values)
+            ):
                 collection_matches.append(c_name)
                 break
 
@@ -151,14 +154,17 @@ def recompute_all_collections(video_index: dict[str, str], mapping_path: str) ->
 
         mapping_data["matched_ids"] = matched_ids
         mapping_data["unmatched_ids"] = unmatched_ids
-        mapping_data["unmatched_tags"] = dict(
-            sorted(unmatched_tags.items(), key=operator.itemgetter(1), reverse=True)
-        )
+        mapping_data["unmatched_tags"] = dict(sorted(unmatched_tags.items(), key=operator.itemgetter(1), reverse=True))
 
         save_map(mapping_path, mapping_data)
         if skipped:
             logger.error("recompute_all_collections: %d video(s) skipped due to read/parse errors", skipped)
-        logger.info("recompute_all_collections: %d matched, %d unmatched, %d skipped", len(matched_ids), len(unmatched_ids), skipped)
+        logger.info(
+            "recompute_all_collections: %d matched, %d unmatched, %d skipped",
+            len(matched_ids),
+            len(unmatched_ids),
+            skipped,
+        )
         return {"matched": len(matched_ids), "unmatched": len(unmatched_ids), "skipped": skipped}
 
 
@@ -184,7 +190,9 @@ def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
 
         logger.info(
             "%s: Collection matching result: %s (remaining tags: %s)",
-            v_id, c_matches, remaining_tags,
+            v_id,
+            c_matches,
+            remaining_tags,
         )
 
         # Only update state if this is a new video (not yet tracked in either list)
@@ -211,7 +219,8 @@ def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
                     except (ValueError, TypeError):
                         logger.warning(
                             "Non-numeric count for tag %r in unmatched_tags (got %r) — treating as 0",
-                            tag, unmatched_tags.get(tag),
+                            tag,
+                            unmatched_tags.get(tag),
                         )
                         current = 0
                     unmatched_tags[tag] = current + 1

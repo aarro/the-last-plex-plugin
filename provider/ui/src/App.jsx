@@ -14,16 +14,15 @@ export default function App() {
   const [fixingThumbs, setFixingThumbs] = useState(false);
 
   const load = useCallback(async () => {
-    const [colRes, vidRes] = await Promise.all([
-      fetch(`${API}/api/collections`),
-      fetch(`${API}/api/videos`),
-    ]);
+    const [colRes, vidRes] = await Promise.all([fetch(`${API}/api/collections`), fetch(`${API}/api/videos`)]);
     setData(await colRes.json());
     setVideos((await vidRes.json()).videos ?? []);
     setDirty(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const setCollections = (collections) => {
     setData((d) => ({ ...d, collections }));
@@ -41,11 +40,17 @@ export default function App() {
       });
       if (!res.ok) throw new Error(await res.text());
       let result;
-      try { result = await res.json(); } catch { throw new Error("Server returned invalid response"); }
+      try {
+        result = await res.json();
+      } catch {
+        throw new Error("Server returned invalid response");
+      }
       const artworkFails = Object.entries(result.artwork ?? {})
-        .filter(([, v]) => !v.ok).map(([k]) => k);
-      const msg = `Saved — ${result.matched} matched, ${result.unmatched} unmatched.`
-        + (artworkFails.length ? ` Artwork failed for: ${artworkFails.join(", ")}.` : "");
+        .filter(([, v]) => !v.ok)
+        .map(([k]) => k);
+      const msg =
+        `Saved — ${result.matched} matched, ${result.unmatched} unmatched.` +
+        (artworkFails.length ? ` Artwork failed for: ${artworkFails.join(", ")}.` : "");
       setStatus({ type: artworkFails.length ? "err" : "ok", msg });
       await load();
     } catch (e) {
@@ -62,7 +67,11 @@ export default function App() {
       const res = await fetch(`${API}/api/rescan`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       let json;
-      try { json = await res.json(); } catch { throw new Error("Server returned invalid response"); }
+      try {
+        json = await res.json();
+      } catch {
+        throw new Error("Server returned invalid response");
+      }
       const n = json.triggered_sections?.length ?? 0;
       if (n > 0) {
         setStatus({ type: "ok", msg: "Plex rescan triggered." });
@@ -83,7 +92,11 @@ export default function App() {
       const res = await fetch(`${API}/api/thumbnails/fix`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       let json;
-      try { json = await res.json(); } catch { throw new Error("Server returned invalid response"); }
+      try {
+        json = await res.json();
+      } catch {
+        throw new Error("Server returned invalid response");
+      }
       const msg = `Thumbnails fixed: ${json.fixed} updated, ${json.failed} failed, ${json.skipped} skipped.`;
       setStatus({ type: json.failed > 0 ? "err" : "ok", msg });
     } catch (e) {
@@ -95,18 +108,28 @@ export default function App() {
 
   const createCollectionFromTag = (tag) => {
     const newCollection = {
-      name: tag.split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+      name: tag
+        .split(" ")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" "),
       rules: [{ field: "tags", values: [tag], match: "exact" }],
     };
     setCollections([...(data?.collections ?? []), newCollection]);
   };
 
-  if (!data) return <div className="app"><p className="empty">Loading…</p></div>;
+  if (!data)
+    return (
+      <div className="app">
+        <p className="empty">Loading…</p>
+      </div>
+    );
 
   return (
     <div className="app">
       <header>
-        <h1><span>YAMP</span> — Collection Manager</h1>
+        <h1>
+          <span>YAMP</span> — Collection Manager
+        </h1>
         <div className="stats">
           <div className="stat">
             <div className="stat-value">{data.matched_count}</div>
@@ -125,31 +148,22 @@ export default function App() {
 
       <div className="two-col">
         <div className="col-left">
-          <Collections
-            collections={data.collections}
-            videos={videos}
-            onChange={setCollections}
-          />
+          <Collections collections={data.collections} videos={videos} onChange={setCollections} />
         </div>
         <div className="col-right">
-          <DiscoverPanel
-            videos={videos}
-            onAddToCollection={createCollectionFromTag}
-          />
+          <DiscoverPanel videos={videos} onAddToCollection={createCollectionFromTag} />
         </div>
       </div>
 
       <div className="action-bar">
-        {status && (
-          <span className={`status ${status.type}`}>{status.msg}</span>
-        )}
-        <button className="btn-ghost" onClick={fixThumbnails} disabled={fixingThumbs}>
+        {status && <span className={`status ${status.type}`}>{status.msg}</span>}
+        <button type="button" className="btn-ghost" onClick={fixThumbnails} disabled={fixingThumbs}>
           {fixingThumbs ? "Fixing…" : "Fix Thumbnails"}
         </button>
-        <button className="btn-ghost" onClick={rescan} disabled={rescanning}>
+        <button type="button" className="btn-ghost" onClick={rescan} disabled={rescanning}>
           {rescanning ? "Rescanning…" : "Rescan Plex"}
         </button>
-        <button className="btn-primary" onClick={save} disabled={!dirty || saving}>
+        <button type="button" className="btn-primary" onClick={save} disabled={!dirty || saving}>
           {saving ? "Saving…" : "Save Changes"}
         </button>
       </div>

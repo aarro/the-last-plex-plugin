@@ -1,11 +1,17 @@
 PROVIDER_DIR := provider
 UI_DIR       := provider/ui
 
-.PHONY: test build dev docker-up docker-down docker-build logs
+.PHONY: test lint build dev docker-up docker-down docker-build logs
 
 # Run all Python tests
 test:
 	uv --directory $(PROVIDER_DIR) run pytest
+
+# Lint + auto-fix all Python (ruff check + format)
+lint:
+	uv --directory $(PROVIDER_DIR) run ruff check --fix .
+	uv --directory $(PROVIDER_DIR) run ruff format .
+	bun run --cwd=$(UI_DIR) lint
 
 # Build the React UI
 build:

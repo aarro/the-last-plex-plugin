@@ -28,4 +28,4 @@ COPY --from=ui-builder /app/ui/dist ./ui/dist
 
 EXPOSE 8765
 
-CMD ["uv", "run", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8765"]
+CMD ["uv", "run", "--no-dev", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8765"]

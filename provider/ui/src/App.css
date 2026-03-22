@@ -7,16 +7,16 @@
 }
 
 :root {
-  --bg: #111;
-  --surface: #1c1c1e;
-  --surface2: #2c2c2e;
-  --border: #3a3a3c;
-  --accent: #e5a00d;
-  --accent-hover: #f0b429;
-  --text: #f2f2f7;
-  --muted: #8e8e93;
-  --danger: #ff453a;
-  --success: #32d74b;
+  --bg: #282a36;
+  --surface: #313341;
+  --surface2: #44475a;
+  --border: #44475a;
+  --accent: #bd93f9;
+  --accent-hover: #caa8ff;
+  --text: #f8f8f2;
+  --muted: #6272a4;
+  --danger: #ff5555;
+  --success: #50fa7b;
   --radius: 10px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -388,7 +388,7 @@ select option {
 .video-meta {
   display: flex;
   gap: 8px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   flex-wrap: wrap;
 }
@@ -400,7 +400,7 @@ select option {
 }
 .collection-badge {
   background: var(--accent);
-  color: #000;
+  color: #1a1a2e;
   border-radius: 4px;
   padding: 1px 7px;
   font-size: 11px;
@@ -440,24 +440,6 @@ select option {
   color: var(--accent);
 }
 
-/* Rules toggle */
-.rules-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 0;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--muted);
-  user-select: none;
-}
-.rules-toggle:hover {
-  color: var(--text);
-}
-.rules-toggle-arrow {
-  font-size: 10px;
-}
-
 .image-edit-row {
   display: flex;
   align-items: center;
@@ -468,29 +450,29 @@ select option {
 /* Thumb grid inside collection cards */
 .thumb-grid {
   display: grid;
-  grid-template-columns: repeat(5, 90px);
+  grid-template-columns: repeat(5, 120px);
   gap: 6px;
   padding: 8px 0 4px;
 }
 .thumb-strip-item {
-  width: 90px;
+  width: 120px;
   cursor: default;
 }
 .thumb-strip-item img {
-  width: 90px;
-  height: 51px;
+  width: 120px;
+  height: 68px;
   object-fit: cover;
   border-radius: 4px;
   display: block;
 }
 .thumb-strip-placeholder {
-  width: 90px;
-  height: 51px;
+  width: 120px;
+  height: 68px;
   background: var(--surface2);
   border-radius: 4px;
 }
 .thumb-title {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
   overflow: hidden;
   white-space: nowrap;

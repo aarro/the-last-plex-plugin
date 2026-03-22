@@ -106,7 +106,6 @@ function isAbsoluteUrl(url) {
 
 function CollectionCard({ collection, videos, onChange, onDelete, otherNames, plexThumb }) {
   const [expanded, setExpanded] = useState(false);
-  const [rulesOpen, setRulesOpen] = useState(false);
   const [editName, setEditName] = useState(collection.name);
   const [editing, setEditing] = useState(false);
   const [nameError, setNameError] = useState(null);
@@ -175,7 +174,7 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
           <img
             src={savedImage || plexThumb}
             alt=""
-            style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
+            style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
           />
         )}
         {editing ? (
@@ -270,7 +269,7 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
                 <img
                   src={editImageUrl || plexThumb}
                   alt=""
-                  style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
+                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
                 />
               )}
               <button type="button" className="btn-primary btn-sm" onClick={saveImage}>
@@ -283,24 +282,15 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
           )}
           <ThumbGrid videos={matched} />
 
-          <button type="button" className="rules-toggle" onClick={() => setRulesOpen((v) => !v)}>
-            <span className="rules-toggle-arrow">{rulesOpen ? "▲" : "▶"}</span>
-            <span>Rules ({collection.rules.length})</span>
+          {collection.rules.length === 0 && <p className="empty">No rules — add one below.</p>}
+          <div className="rules">
+            {collection.rules.map((rule, i) => (
+              <RuleForm key={i} rule={rule} onChange={(r) => updateRule(i, r)} onRemove={() => removeRule(i)} />
+            ))}
+          </div>
+          <button type="button" className="btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={addRule}>
+            + Add Rule
           </button>
-
-          {rulesOpen && (
-            <>
-              {collection.rules.length === 0 && <p className="empty">No rules — add one below.</p>}
-              <div className="rules">
-                {collection.rules.map((rule, i) => (
-                  <RuleForm key={i} rule={rule} onChange={(r) => updateRule(i, r)} onRemove={() => removeRule(i)} />
-                ))}
-              </div>
-              <button type="button" className="btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={addRule}>
-                + Add Rule
-              </button>
-            </>
-          )}
         </div>
       )}
     </div>

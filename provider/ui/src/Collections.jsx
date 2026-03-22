@@ -270,7 +270,12 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
               <RuleForm key={i} rule={rule} onChange={(r) => updateRule(i, r)} onRemove={() => removeRule(i)} />
             ))}
           </div>
-          <button type="button" className="btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={addRule}>
+          <button
+            type="button"
+            className="btn-ghost btn-sm"
+            style={{ marginTop: 10, display: "block", marginLeft: "auto" }}
+            onClick={addRule}
+          >
             + Add Rule
           </button>
 
@@ -314,27 +319,22 @@ function AddCollectionForm({ onAdd, onCancel, existingNames }) {
   return (
     <div className="add-collection-form">
       <div className="form-row">
-        <div className="form-group">
-          <label>
-            New collection name
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value);
-                setNameError(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-                if (e.key === "Escape") onCancel();
-              }}
-              placeholder="e.g. GoGo Penguin"
-              autoFocus
-              className={nameError ? "input-error" : undefined}
-            />
-            {nameError && <span className="field-error">{nameError}</span>}
-          </label>
-        </div>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => {
+            setName(e.target.value);
+            setNameError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+            if (e.key === "Escape") onCancel();
+          }}
+          placeholder="New collection name, e.g. GoGo Penguin"
+          autoFocus
+          className={nameError ? "input-error" : undefined}
+          style={{ flex: 1 }}
+        />
         <button type="button" className="btn-primary" onClick={submit} disabled={!name.trim()}>
           Add
         </button>
@@ -342,6 +342,7 @@ function AddCollectionForm({ onAdd, onCancel, existingNames }) {
           Cancel
         </button>
       </div>
+      {nameError && <span className="field-error">{nameError}</span>}
     </div>
   );
 }

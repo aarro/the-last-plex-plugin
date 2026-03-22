@@ -106,17 +106,6 @@ export default function App() {
     }
   };
 
-  const createCollectionFromTag = (tag) => {
-    const newCollection = {
-      name: tag
-        .split(" ")
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-        .join(" "),
-      rules: [{ field: "tags", values: [tag], match: "exact" }],
-    };
-    setCollections([...(data?.collections ?? []), newCollection]);
-  };
-
   if (!data)
     return (
       <div className="app">
@@ -149,7 +138,7 @@ export default function App() {
           <Collections collections={data.collections} videos={videos} onChange={setCollections} />
         </div>
         <div className="col-right">
-          <DiscoverPanel videos={videos} onAddToCollection={createCollectionFromTag} />
+          <DiscoverPanel videos={videos} />
         </div>
       </div>
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-export default function DiscoverPanel({ videos, onAddToCollection }) {
+export default function DiscoverPanel({ videos }) {
   const [search, setSearch] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [expandedTags, setExpandedTags] = useState(new Set());
@@ -98,8 +98,8 @@ export default function DiscoverPanel({ videos, onAddToCollection }) {
                           key={tag}
                           type="button"
                           className="tag-chip-sm"
-                          title={`Add collection rule for "${tag}"`}
-                          onClick={() => onAddToCollection?.(tag)}
+                          title={`Copy "${tag}" to clipboard`}
+                          onClick={() => navigator.clipboard.writeText(tag)}
                         >
                           {tag}
                         </button>

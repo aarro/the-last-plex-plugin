@@ -67,7 +67,7 @@ function RuleForm({ rule, onChange, onRemove }) {
 
 const THUMB_PAGE = 4;
 
-function ThumbGrid({ videos }) {
+function ThumbGrid({ videos, onVideoSearch }) {
   const [expanded, setExpanded] = useState(false);
   if (videos.length === 0) {
     return <p className="empty thumb-grid-empty">No videos matched yet.</p>;
@@ -78,14 +78,20 @@ function ThumbGrid({ videos }) {
     <>
       <div className="thumb-grid">
         {shown.map((v) => (
-          <div key={v.id} className="thumb-strip-item" title={v.title}>
+          <button
+            key={v.id}
+            type="button"
+            className="thumb-strip-item"
+            title={v.title}
+            onClick={() => onVideoSearch?.(v.title)}
+          >
             {v.thumbnail ? (
               <img src={v.thumbnail} alt="" loading="lazy" />
             ) : (
               <div className="thumb-strip-placeholder" />
             )}
             <div className="thumb-title">{v.title}</div>
-          </div>
+          </button>
         ))}
       </div>
       {videos.length > THUMB_PAGE && (
@@ -101,7 +107,7 @@ function isAbsoluteUrl(url) {
   return typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"));
 }
 
-function CollectionCard({ collection, videos, onChange, onDelete, otherNames, plexThumb }) {
+function CollectionCard({ collection, videos, onChange, onDelete, otherNames, plexThumb, onVideoSearch }) {
   const [expanded, setExpanded] = useState(false);
   const [editName, setEditName] = useState(collection.name);
   const [nameError, setNameError] = useState(null);
@@ -268,7 +274,7 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
             </div>
 
             {/* Matched video thumbnails */}
-            <ThumbGrid videos={matched} />
+            <ThumbGrid videos={matched} onVideoSearch={onVideoSearch} />
           </div>
 
           {/* Full-width row 3: rules + actions */}
@@ -351,7 +357,7 @@ function AddCollectionForm({ onAdd, onCancel, existingNames }) {
   );
 }
 
-export default function Collections({ collections, videos, onChange }) {
+export default function Collections({ collections, videos, onChange, onVideoSearch }) {
   const [adding, setAdding] = useState(false);
 
   const updateAt = (i, c) => {
@@ -390,6 +396,7 @@ export default function Collections({ collections, videos, onChange }) {
           onDelete={() => deleteAt(i)}
           otherNames={collections.filter((_, idx) => idx !== i).map((x) => x.name)}
           plexThumb={c.plex_thumb}
+          onVideoSearch={onVideoSearch}
         />
       ))}
 

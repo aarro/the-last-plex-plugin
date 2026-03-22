@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 
-export default function DiscoverPanel({ videos }) {
-  const [search, setSearch] = useState("");
+export default function DiscoverPanel({ videos, search, onSearch }) {
   const [showAll, setShowAll] = useState(false);
   const [expandedTags, setExpandedTags] = useState(new Set());
   const [toast, setToast] = useState(null);
@@ -13,10 +12,21 @@ export default function DiscoverPanel({ videos }) {
   }, [toast]);
 
   const copyTag = (tag) => {
-    navigator.clipboard.writeText(tag).then(
-      () => setToast(`Copied "${tag}"`),
-      () => setToast(`Copy failed — paste manually: ${tag}`)
-    );
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(tag).then(
+        () => setToast(`Copied "${tag}"`),
+        () => setToast(`Copy failed — paste manually: ${tag}`)
+      );
+    } else {
+      const el = document.createElement("textarea");
+      el.value = tag;
+      el.style.cssText = "position:fixed;opacity:0";
+      document.body.appendChild(el);
+      el.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(el);
+      setToast(ok ? `Copied "${tag}"` : `Copy failed — paste manually: ${tag}`);
+    }
   };
 
   const toggleTags = (id) => {
@@ -50,7 +60,7 @@ export default function DiscoverPanel({ videos }) {
         type="text"
         placeholder="Search title, channel, or tags…"
         value={search}
-        onChange={(e) => setSearch(e.target.value)}
+        onChange={(e) => onSearch(e.target.value)}
         className="discover-search"
       />
 

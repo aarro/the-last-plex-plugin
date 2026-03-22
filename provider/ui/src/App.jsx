@@ -20,6 +20,7 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [rescanning, setRescanning] = useState(false);
   const [fixingThumbs, setFixingThumbs] = useState(false);
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     const [colRes, vidRes] = await Promise.all([fetch("/api/collections"), fetch("/api/videos")]);
@@ -122,10 +123,15 @@ export default function App() {
 
       <div className="two-col">
         <div className="col-left">
-          <Collections collections={data.collections} videos={videos} onChange={setCollections} />
+          <Collections
+            collections={data.collections}
+            videos={videos}
+            onChange={setCollections}
+            onVideoSearch={setSearch}
+          />
         </div>
         <div className="col-right">
-          <DiscoverPanel videos={videos} />
+          <DiscoverPanel videos={videos} search={search} onSearch={setSearch} />
         </div>
       </div>
 

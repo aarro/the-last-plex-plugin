@@ -277,6 +277,11 @@ select:focus {
 select option {
   background: var(--surface2);
 }
+/* Name input in expanded card matches rule-form control style */
+.card-body-top input[type="text"] {
+  border-color: var(--muted);
+  background: var(--bg);
+}
 
 .rule-form {
   background: var(--surface2);
@@ -459,7 +464,12 @@ select option {
 }
 .thumb-strip-item {
   min-width: 0;
-  cursor: default;
+  cursor: pointer;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  text-align: left;
+  width: 100%;
 }
 .thumb-strip-item img {
   width: 100%;

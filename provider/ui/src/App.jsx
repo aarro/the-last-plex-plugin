@@ -127,9 +127,7 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>
-          <span>YAMP</span> — Collection Manager
-        </h1>
+        <img src="/logo.svg" alt="YAMP" height="40" style={{ display: "block" }} />
         <div className="stats">
           <div className="stat">
             <div className="stat-value">{data.matched_count}</div>

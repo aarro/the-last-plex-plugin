@@ -1,6 +1,6 @@
-# The Last Plex Plugin → YAMP
+<p align="center"><img src="assets/wordmark-b.svg" alt="YAMP" height="72"></p>
 
-**YAMP** (YouTube Auto Metadata Provider / Yet Another Metadata Provider) is a [Plex Custom Metadata Provider](https://developer.plex.tv/pms/) for YouTube videos downloaded with [yt-dlp](https://github.com/yt-dlp/yt-dlp) or [MeTube](https://github.com/alexta69/metube).
+**YAMP** (Yet Another Media Provider) is a [Plex Custom Metadata Provider](https://developer.plex.tv/pms/) for YouTube videos downloaded with [yt-dlp](https://github.com/yt-dlp/yt-dlp) or [MeTube](https://github.com/alexta69/metube).
 
 It reads `.info.json` sidecar files to populate Plex with rich metadata — title, description, upload date, channel, genres, thumbnails — and organises videos into Plex collections using a rule-based system you manage through a built-in web UI.
 

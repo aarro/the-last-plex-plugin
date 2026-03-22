@@ -32,6 +32,7 @@ from collection_map import (
 )
 from metadata import (
     _BILIBILI_ID_RE,
+    _GENERIC_ID_RE,
     _YOUTUBE_ID_RE,
     build_metadata_response,
     extract_video_id,
@@ -65,6 +66,10 @@ _last_rebuild: float = 0.0
 _REBUILD_COOLDOWN = 60.0
 
 
+# Sanity-check IDs read directly from info.json (build_index fallback for no-bracket filenames)
+_VALID_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,}$")
+
+
 def build_index(data_path: str) -> tuple[dict[str, str], dict[str, str]]:
     """Walk data_path and index all .info.json files by video ID.
 
@@ -87,6 +92,15 @@ def build_index(data_path: str) -> tuple[dict[str, str], dict[str, str]]:
             # Fall back to the containing directory name, which covers MeTube's
             # per-video folder layout: "Channel/Title [VIDEO_ID]/Title.info.json".
             video_id = extract_video_id(f) or extract_video_id(os.path.basename(root))
+            if not video_id:
+                # No bracket-wrapped ID found — read the canonical ID from the JSON itself.
+                # Handles non-standard output templates where yt-dlp omits [id] from the name.
+                try:
+                    with open(os.path.join(root, f), encoding="utf-8") as fh:
+                        raw_id = json.load(fh).get("id", "")
+                    video_id = raw_id if raw_id and _VALID_ID_RE.match(raw_id) else None
+                except (OSError, json.JSONDecodeError):
+                    pass
             if not video_id:
                 continue
             path = os.path.join(root, f)
@@ -209,9 +223,9 @@ def _require_api_key(request: Request) -> None:
 
 
 def _validate_video_id(video_id: str) -> bool:
-    """Return True if video_id matches a known YouTube or Bilibili ID format."""
+    """Return True if video_id matches a known yt-dlp ID format."""
     probe = f"[{video_id}]"
-    return bool(_YOUTUBE_ID_RE.search(probe) or _BILIBILI_ID_RE.search(probe))
+    return bool(_YOUTUBE_ID_RE.search(probe) or _BILIBILI_ID_RE.search(probe) or _GENERIC_ID_RE.search(probe))
 
 
 def _media_container(metadata_list: list[dict]) -> dict:
@@ -665,6 +679,15 @@ def _video_id_from_plex_item(item) -> str | None:
     return None
 
 
+def _has_local_thumbnail(video_id: str, video_index: dict[str, str]) -> bool:
+    """Return True if a local image file exists alongside this video's .info.json."""
+    info_path = video_index.get(video_id)
+    if not info_path:
+        return False
+    base = Path(info_path).with_suffix("").with_suffix("")  # strip both .json and .info
+    return any(base.with_suffix(ext).exists() for ext in (".jpg", ".jpeg", ".png", ".webp"))
+
+
 def _find_matching_plex_items(section, col_spec: list) -> list:
     """Return Plex video objects in `section` whose info_json matches col_spec."""
     results = []
@@ -871,12 +894,15 @@ async def _sync_collection_artwork_bg(col) -> None:
         logger.exception("Background artwork sync raised an unhandled exception for '%s'", col.name)
 
 
-def _fix_all_thumbnails(meta_cache: dict[str, dict] | None = None) -> dict:
+def _fix_all_thumbnails(
+    meta_cache: dict[str, dict] | None = None,
+    video_index: dict[str, str] | None = None,
+) -> dict:
     """Upload YAMP-proxied thumbnails for every video in YAMP-managed Plex sections.
 
     Synchronous — call via asyncio.to_thread. Returns {fixed, failed, skipped}.
-    meta_cache is passed in by the caller before thread dispatch to avoid reading a
-    global that may be replaced concurrently.
+    meta_cache and video_index are passed in by the caller before thread dispatch to
+    avoid reading globals that may be replaced concurrently.
     """
     import requests.exceptions
     from plexapi.exceptions import PlexApiException
@@ -912,6 +938,12 @@ def _fix_all_thumbnails(meta_cache: dict[str, dict] | None = None) -> dict:
                 )  # noqa: E501
                 skipped += 1
                 continue
+            _index = video_index or _video_index
+            has_local = _has_local_thumbnail(video_id, _index)
+            has_youtube = bool(((meta_cache or {}).get(video_id) or {}).get("thumbnail"))
+            if not (has_local or has_youtube):
+                skipped += 1
+                continue
             if YAMP_URL:
                 thumb_url = f"{YAMP_URL}/api/thumbnail/{video_id}"
             else:
@@ -936,8 +968,9 @@ async def api_fix_thumbnails():
     """Push YAMP-proxied thumbnails to Plex for all videos in YAMP-managed libraries."""
     if not PLEX_URL or not PLEX_TOKEN:
         raise HTTPException(status_code=400, detail="PLEX_URL and PLEX_TOKEN env vars not set")
-    cache = _video_meta_cache  # capture ref before thread dispatch
-    result = await asyncio.to_thread(_fix_all_thumbnails, cache)
+    cache = _video_meta_cache  # capture refs before thread dispatch
+    index = _video_index
+    result = await asyncio.to_thread(_fix_all_thumbnails, cache, index)
     if "error" in result:
         raise HTTPException(status_code=502, detail=result["error"])
     return result

@@ -27,6 +27,10 @@ def _load_info() -> dict:
         ("Some_Video_Title [abc123defgh].webm", "abc123defgh"),
         # Bilibili
         ("Some Bilibili Video [BV1464y1s7aG].mp4", "BV1464y1s7aG"),
+        # Non-YouTube extractors with shorter numeric/alphanumeric IDs
+        ("Broadcast_Special_2023 [9876543210].mp4", "9876543210"),
+        ("Concert_Film [12345678].mp4", "12345678"),
+        ("Documentary_Series [ab12345].mp4", "ab12345"),
         # No ID → None
         ("plain-filename.mp4", None),
         ("no_brackets_at_all.mp4", None),

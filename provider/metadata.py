@@ -7,9 +7,10 @@ from datetime import date, datetime
 from pathlib import Path
 
 # yt-dlp embeds the ID in square brackets before the extension: "Title [VIDEO_ID].mp4"
-# YouTube IDs are 11 chars; Bilibili uses BV + alphanumeric
+# YouTube IDs are 11 chars; Bilibili uses BV + alphanumeric; other extractors vary.
 _YOUTUBE_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\](?:\.[^.\s]+)*$")
 _BILIBILI_ID_RE = re.compile(r"\[([AB][Vv][A-Za-z0-9]+)\](?:\.[^.\s]+)*$")
+_GENERIC_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{5,})\](?:\.[^.\s]+)*$")
 
 
 def _require_fields(info_json: dict, *fields: str) -> None:
@@ -22,7 +23,7 @@ def _require_fields(info_json: dict, *fields: str) -> None:
 def extract_video_id(filename: str) -> str | None:
     """Extract video ID from a yt-dlp filename."""
     basename = Path(filename).name
-    m = _YOUTUBE_ID_RE.search(basename) or _BILIBILI_ID_RE.search(basename)
+    m = _YOUTUBE_ID_RE.search(basename) or _BILIBILI_ID_RE.search(basename) or _GENERIC_ID_RE.search(basename)
     return m.group(1) if m else None
 
 

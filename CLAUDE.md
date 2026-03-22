@@ -41,7 +41,9 @@ On startup, YAMP walks `YOUTUBE_DATA_PATH` and builds two in-memory structures:
 - **`_video_index`**: `{video_id → info_json_path}` — used to locate `.info.json` files
 - **`_video_meta_cache`**: `{video_id → MATCH_FIELDS subset}` — pre-loaded metadata for the rule engine, eliminating disk I/O during collection recompute
 
-When Plex calls the match endpoint with a filename, `extract_video_id()` in `metadata.py` uses a regex to pull the ID from the `[...]` suffix.
+When Plex calls the match endpoint with a filename, `extract_video_id()` in `metadata.py` uses a regex to pull the ID from the `[...]` suffix. Three patterns are tried in order: YouTube (exactly 11 chars), Bilibili (`BV` prefix), and a general fallback (5+ alphanumeric chars) that covers other yt-dlp extractors with shorter or differently-shaped IDs.
+
+For files with no bracket-wrapped ID in the filename at all (e.g. non-standard yt-dlp output templates), `build_index` falls back to reading `info["id"]` directly from the JSON. The stem index (`_stem_index`) is then populated with that entry, enabling the Tier-3 stem-based lookup in the match endpoint.
 
 **New video self-registration:** when Plex matches a file not yet in the index, YAMP checks for the sidecar `.info.json` alongside the media file path that Plex provided (`_try_index_from_filename()`). If found, that single entry is added to both `_video_index` and `_video_meta_cache` immediately — no full directory walk required. This means new downloads are picked up on first Plex scan with no delay.
 
@@ -50,7 +52,7 @@ When Plex calls the match endpoint with a filename, `extract_video_id()` in `met
 1. **`GET /movies`** — Plex discovers the provider. Returns `MediaProvider` JSON with identifier `tv.plex.agents.custom.yamp`.
 2. **`POST /movies/library/metadata/matches`** — Plex sends `{filename, title, year}`. We extract the video ID, find the `.info.json`, and return a match stub.
 3. **`GET /movies/library/metadata/{rating_key}`** — Plex fetches full metadata. We read the `.info.json`, run collection matching, and return the full response.
-4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the thumbnail as `coverPoster`. When `YAMP_URL` is set, always returns `{YAMP_URL}/api/thumbnail/{video_id}` so Plex gets a YAMP-served URL (Plex can't reliably reach YouTube directly). Falls back to the YouTube URL from `thumbnail` if `YAMP_URL` is not configured.
+4. **`GET /movies/library/metadata/{rating_key}/images`** — Returns the thumbnail as `coverPoster`. When `YAMP_URL` is set, returns `{YAMP_URL}/api/thumbnail/{video_id}` so Plex loads thumbnails through YAMP's proxy (useful when Plex can't reach external CDNs). Falls back to the raw `thumbnail` URL from `info_json` when `YAMP_URL` is not set.
 
 `rating_key` format: bare `{video_id}` (e.g. `dQw4w9WgXcQ`).
 
@@ -129,9 +131,13 @@ If `PLEX_URL` / `PLEX_TOKEN` are not set, artwork push, Plex rescan, and `plex_t
 `GET /api/thumbnail/{video_id}` serves thumbnails to both the YAMP UI and (via the images endpoint) to Plex:
 
 1. If a local image file (`.jpg`/`.jpeg`/`.png`/`.webp`) exists alongside the `.info.json`, serve it directly via `FileResponse`.
-2. Otherwise, proxy the remote `thumbnail` URL from `info_json` via httpx — Plex can't reliably reach YouTube CDN directly.
+2. Otherwise, proxy the remote `thumbnail` URL from `info_json` via httpx (useful when Plex can't reach the external CDN directly).
 
 `GET /api/plex-collection-thumb?path=…` proxies Plex collection poster images server-side (keeps the Plex token out of the browser).
+
+**Fix Thumbnails (`POST /api/thumbnails/fix`)** iterates every item in YAMP-managed Plex sections and uploads the correct thumbnail. Smart overwrite logic:
+- If YAMP has content (local image file OR YouTube URL in meta_cache) → upload to Plex (always overwrites).
+- If YAMP has no content → skip (preserves any existing Plex poster; prevents a 404/empty upload from clearing it).
 
 ## Running Locally
 
@@ -183,14 +189,14 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 | `PLEX_TOKEN`         | —        | Your X-Plex-Token                    |
 | `PORT`               | `8765`   | Port the server listens on           |
 | `API_KEY`            | —        | Bearer token for write API endpoints (`PUT /api/collections`, `POST /api/rescan`, `POST /api/thumbnails/fix`, `POST /api/index/rebuild`). If unset, those endpoints are open (backward-compatible). |
-| `YAMP_URL`           | —        | Public URL of this YAMP instance (e.g. `http://192.168.1.10:8765`). Required for Plex to load thumbnails — when set, all video thumbnails are proxied through YAMP rather than served as raw YouTube URLs. |
+| `YAMP_URL`           | —        | Public URL of this YAMP instance (e.g. `http://192.168.1.10:8765`). When set, all video thumbnails are proxied through YAMP rather than served as raw external URLs. Useful when Plex can't reach the external CDN directly; optional if Plex has direct internet access. |
 
 ## Key Files
 
 - `Makefile` — common dev tasks (test, build, dev, docker-*)
 - `provider/collection_map.py` — `MATCH_FIELDS`, `diff_collections()`, `match_video()`, `resolve_collections()`, `recompute_all_collections()`, `find_collection_map()`
-- `provider/metadata.py` — `extract_video_id()`, `build_metadata_response()`
-- `provider/app.py` — all FastAPI routes; `build_meta_cache()`, `_do_rescan()`, `_sync_collection_artwork()`, `_sync_collection_artwork_bg()`, `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, `_fix_all_thumbnails()`, `_try_index_from_filename()`, thumbnail proxy + Plex collection thumb proxy
+- `provider/metadata.py` — `extract_video_id()` (YouTube/Bilibili/generic regex), `build_metadata_response()`
+- `provider/app.py` — all FastAPI routes; `build_index()` (with info.json ID fallback), `build_meta_cache()`, `_video_id_from_plex_item()`, `_has_local_thumbnail()`, `_do_rescan()`, `_sync_collection_artwork()`, `_sync_collection_artwork_bg()`, `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, `_fix_all_thumbnails()`, `_try_index_from_filename()`, thumbnail proxy + Plex collection thumb proxy
 - `provider/ui/src/App.jsx` — React root, state management, save/rescan/fix-thumbnails actions
 - `provider/ui/src/Collections.jsx` — collection editor (rules, name, poster image); plex_thumb shown as display-only preview
 - `provider/ui/src/DiscoverPanel.jsx` — video browser; click any tag to create a collection from it

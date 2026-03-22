@@ -11,14 +11,16 @@ Plex deprecated their legacy Python plugin framework in 2026. This replaces the 
 ## Features
 
 - **Auto-metadata** from `.info.json`: title, description, upload date, duration, channel (as director), genres, thumbnail as poster art
-- **Thumbnail proxy** — YAMP serves all video thumbnails to Plex (proxying YouTube when no local file exists), so Plex doesn't need direct access to YouTube CDN
+- **Multi-platform support** — indexes videos from YouTube, Bilibili, and any other yt-dlp extractor; ID detection is regex-based with a JSON fallback for non-standard filename templates
+- **Thumbnail proxy** — YAMP serves all video thumbnails; proxies the remote URL when no local file exists. `YAMP_URL` is optional — omit it if Plex has direct internet access
 - **Collection rules** driven by tags, title substrings, or channel name
 - **Collection poster images** — set a URL in the UI and YAMP pushes it to Plex as the collection artwork on save; existing Plex posters are pre-loaded when you open the editor
 - **Fast saves** — collection matching uses an in-memory metadata cache (no disk I/O); image/name-only edits skip recompute entirely; Plex artwork sync and rescan run in the background so saves return immediately
 - **Web UI** at `http://localhost:8765` to add/edit/delete collections and rules
 - **Discover panel** — browse unmatched (or all) videos, search by title/channel/tag, click any tag to instantly create a collection from it; click a video thumbnail in a collection to search for it in the Discover panel
 - **Rescan button** — trigger a Plex metadata refresh directly from the UI
-- **Fix Thumbnails button** — backfill thumbnails for all existing videos (uses YAMP proxy if `YAMP_URL` is set, otherwise falls back to YouTube URLs directly)
+- **Fix Thumbnails button** — backfill thumbnails for all existing videos; preserves existing Plex posters for videos where YAMP has no thumbnail to offer
+- **Version display** — running version shown in the UI header (matches the Docker image tag)
 - **Makefile** for common dev tasks: `make test`, `make build`, `make dev`, `make docker-up`, etc.
 - **Docker Compose** setup with Plex + MeTube + YAMP all sharing one volume
 
@@ -35,8 +37,8 @@ git clone https://github.com/aarro/the-last-plex-plugin
 cd the-last-plex-plugin
 
 # 1. Edit provider/docker-compose.yml — set the youtube-data volume device path
-# 2. Create provider/.env with PLEX_URL, PLEX_TOKEN, PLEX_CLAIM, and YAMP_URL
-#    YAMP_URL is the address Plex uses to load thumbnails (all thumbnails are proxied through YAMP)
+# 2. Create provider/.env with PLEX_URL, PLEX_TOKEN, PLEX_CLAIM
+#    Optional: set YAMP_URL if Plex can't reach external CDNs directly
 
 make docker-up
 ```

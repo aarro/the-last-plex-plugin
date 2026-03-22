@@ -1,9 +1,23 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function DiscoverPanel({ videos }) {
   const [search, setSearch] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [expandedTags, setExpandedTags] = useState(new Set());
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const copyTag = (tag) => {
+    navigator.clipboard.writeText(tag).then(
+      () => setToast(`Copied "${tag}"`),
+      () => setToast(`Copy failed — paste manually: ${tag}`)
+    );
+  };
 
   const toggleTags = (id) => {
     setExpandedTags((s) => {
@@ -30,6 +44,7 @@ export default function DiscoverPanel({ videos }) {
   return (
     <section>
       <h2>Discover</h2>
+      {toast && <div className="toast">{toast}</div>}
 
       <input
         type="text"
@@ -99,7 +114,7 @@ export default function DiscoverPanel({ videos }) {
                           type="button"
                           className="tag-chip-sm"
                           title={`Copy "${tag}" to clipboard`}
-                          onClick={() => navigator.clipboard.writeText(tag)}
+                          onClick={() => copyTag(tag)}
                         >
                           {tag}
                         </button>

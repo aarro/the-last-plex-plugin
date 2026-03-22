@@ -32,7 +32,7 @@ function RuleForm({ rule, onChange, onRemove }) {
           </select>
         </label>
       </div>
-      <div className="form-group" style={{ flex: 2 }}>
+      <div className="form-group">
         <label>
           Values (comma-separated)
           <input

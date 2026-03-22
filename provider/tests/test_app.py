@@ -82,6 +82,73 @@ def test_build_index_filename_id_takes_priority(tmp_path):
     assert dir_id not in index
 
 
+# ── _video_id_from_plex_item ──────────────────────────────────────────────────
+
+
+def _make_item(guid: str):
+    item = MagicMock()
+    item.guid = guid
+    return item
+
+
+def test_video_id_from_plex_item_yamp_guid():
+    from app import _video_id_from_plex_item
+
+    item = _make_item("tv.plex.agents.custom.yamp://movie/dQw4w9WgXcQ")
+    assert _video_id_from_plex_item(item) == "dQw4w9WgXcQ"
+
+
+def test_video_id_from_plex_item_unknown_guid_returns_none():
+    from app import _video_id_from_plex_item
+
+    item = _make_item("com.plexapp.agents.imdb://tt1234567?lang=en")
+    assert _video_id_from_plex_item(item) is None
+
+
+@pytest.mark.parametrize(
+    "guid,stem_index,expected",
+    [
+        # ID embedded in parent directory name (MeTube layout: "Title [ID]/Title.mp4")
+        (
+            "com.plexapp.agents.youtube-as-movies://youtube-as-movies|"
+            "%2Fdata%2FBroadcast_Special_2023%20%5B9876543210%5D%2FBroadcast_Special_2023%2Emp4"
+            "|aabbccdd?lang=en",
+            {},
+            "9876543210",
+        ),
+        # ID embedded in parent directory name (8-digit numeric)
+        (
+            "com.plexapp.agents.youtube-as-movies://youtube-as-movies|"
+            "%2Fdata%2FChannel%20%5BUCabc123%5D%2FConcert_Film%20%5B12345678%5D%2FConcert_Film%2Emp4"
+            "|aabbccdd?lang=en",
+            {},
+            "12345678",
+        ),
+        # ID embedded in parent directory name (short alphanumeric)
+        (
+            "com.plexapp.agents.youtube-as-movies://youtube-as-movies|"
+            "%2Fdata%2FDocumentary_Series%20%5Bab12345%5D%2FDocumentary_Series%2Emp4"
+            "|aabbccdd?lang=en",
+            {},
+            "ab12345",
+        ),
+        # No brackets anywhere — ID resolved via stem_index fallback
+        (
+            "com.plexapp.agents.youtube-as-movies://youtube-as-movies|"
+            "%2Fdata%2FChannel%2FConcert_Film_-__ab12345_original%2Emp4"
+            "|aabbccdd?lang=en",
+            {"Concert_Film_-__ab12345_original": "ab12345"},
+            "ab12345",
+        ),
+    ],
+)
+def test_video_id_from_plex_item_legacy_guid(guid, stem_index, expected):
+    from app import _video_id_from_plex_item
+
+    item = _make_item(guid)
+    assert _video_id_from_plex_item(item, stem_index) == expected
+
+
 # ── /api/thumbnail/{video_id} ─────────────────────────────────────────────────
 
 

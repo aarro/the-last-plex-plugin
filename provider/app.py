@@ -12,7 +12,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
@@ -670,12 +670,38 @@ async def _fetch_plex_sections(client: httpx.AsyncClient) -> list[dict]:
     return data.get("MediaContainer", {}).get("Directory", [])
 
 
-def _video_id_from_plex_item(item) -> str | None:
-    """Extract the YAMP video ID from a plexapi library item, or None if not a YAMP item."""
+_LEGACY_AGENT_GUID_PREFIX = "com.plexapp.agents.youtube-as-movies://youtube-as-movies|"
+
+
+def _video_id_from_plex_item(item, stem_index: dict[str, str] | None = None) -> str | None:
+    """Extract the video ID from a plexapi library item.
+
+    Handles both YAMP GUIDs (tv.plex.agents.custom.yamp://movie/{id}) and legacy
+    youtube-as-movies agent GUIDs (com.plexapp.agents.youtube-as-movies://youtube-as-movies|{path}|{hash}).
+    """
     guid = getattr(item, "guid", "") or ""
+
+    # YAMP GUID: tv.plex.agents.custom.yamp://movie/{video_id}
     prefix = f"{IDENTIFIER}://movie/"
     if guid.startswith(prefix):
         return guid[len(prefix) :].rstrip("/") or None
+
+    # Legacy agent GUID: ...youtube-as-movies|{URL_ENCODED_PATH}|{HASH}?lang=en
+    if guid.startswith(_LEGACY_AGENT_GUID_PREFIX):
+        rest = guid[len(_LEGACY_AGENT_GUID_PREFIX) :]
+        path = Path(unquote(rest.split("|")[0]))
+        # Try extract_video_id on the filename and parent directory name.
+        # Covers the MeTube layout where yt-dlp embeds the ID in the folder name:
+        # "Channel/Title [VIDEO_ID]/Title.mp4"
+        for part in (path.name, path.parent.name):
+            video_id = extract_video_id(part)
+            if video_id:
+                return video_id
+        # Fallback: stem-index lookup for no-bracket filenames where the ID
+        # was read from info.json content during build_index.
+        _si = stem_index if stem_index is not None else _stem_index
+        return _si.get(path.stem)
+
     return None
 
 
@@ -897,6 +923,7 @@ async def _sync_collection_artwork_bg(col) -> None:
 def _fix_all_thumbnails(
     meta_cache: dict[str, dict] | None = None,
     video_index: dict[str, str] | None = None,
+    stem_index: dict[str, str] | None = None,
 ) -> dict:
     """Upload YAMP-proxied thumbnails for every video in YAMP-managed Plex sections.
 
@@ -931,7 +958,7 @@ def _fix_all_thumbnails(
             failed += 1
             continue
         for item in items:
-            video_id = _video_id_from_plex_item(item)
+            video_id = _video_id_from_plex_item(item, stem_index)
             if not video_id:
                 logger.warning(
                     "_fix_all_thumbnails: skipping item with unrecognised guid %r", getattr(item, "guid", "")
@@ -970,7 +997,8 @@ async def api_fix_thumbnails():
         raise HTTPException(status_code=400, detail="PLEX_URL and PLEX_TOKEN env vars not set")
     cache = _video_meta_cache  # capture refs before thread dispatch
     index = _video_index
-    result = await asyncio.to_thread(_fix_all_thumbnails, cache, index)
+    si = _stem_index
+    result = await asyncio.to_thread(_fix_all_thumbnails, cache, index, si)
     if "error" in result:
         raise HTTPException(status_code=502, detail=result["error"])
     return result

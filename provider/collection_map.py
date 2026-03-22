@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 MAPPING_FILE_NAME = "_collection_map.json"
 
+# Fields read by the rule engine — used to populate the in-memory meta cache.
+# Includes "thumbnail" so the Fix Thumbnails fallback can use the cache too.
+MATCH_FIELDS = frozenset(
+    {"tags", "title", "channel", "uploader", "categories", "description", "extractor", "thumbnail"}
+)
+
 _MAP_LOCK = threading.Lock()
 
 
@@ -60,6 +66,24 @@ def save_map(mapping_path: str, data: dict) -> None:
         except OSError as unlink_err:
             logger.warning("save_map: failed to clean up temp file '%s': %s", tmp_path, unlink_err)
         raise
+
+
+def diff_collections(old: list[dict], new: list[dict]) -> tuple[set[str], bool]:
+    """Compare old and new collection lists by name.
+
+    Returns (rules_changed, has_changes) where:
+      rules_changed — names of collections that were added, deleted, or had rules edited
+      has_changes   — True if any recompute is needed (False for image/name-only edits)
+    """
+    old_by_name = {c["name"]: c.get("rules", []) for c in old}
+    new_by_name = {c["name"]: c.get("rules", []) for c in new}
+
+    deleted = set(old_by_name) - set(new_by_name)
+    added = set(new_by_name) - set(old_by_name)
+    modified = {n for n in old_by_name.keys() & new_by_name.keys() if old_by_name[n] != new_by_name[n]}
+
+    rules_changed = deleted | added | modified
+    return rules_changed, bool(rules_changed)
 
 
 def match_video(info_json: dict, collections: list[dict]) -> tuple[list[str], set[str]]:
@@ -118,12 +142,17 @@ def match_video(info_json: dict, collections: list[dict]) -> tuple[list[str], se
     return list(set(collection_matches)), tags
 
 
-def recompute_all_collections(video_index: dict[str, str], mapping_path: str) -> dict:
+def recompute_all_collections(
+    video_index: dict[str, str],
+    mapping_path: str,
+    meta_cache: dict[str, dict] | None = None,
+) -> dict:
     """
     Re-run collection matching against all indexed videos.
 
     Clears and rebuilds matched_ids, unmatched_ids, and unmatched_tags from scratch.
-    Returns {"matched": int, "unmatched": int} stats.
+    When meta_cache is provided, uses it instead of reading files from disk.
+    Returns {"matched": int, "unmatched": int, "skipped": int} stats.
     """
     with _MAP_LOCK:
         mapping_data = load_map(mapping_path)
@@ -135,13 +164,20 @@ def recompute_all_collections(video_index: dict[str, str], mapping_path: str) ->
         skipped = 0
 
         for video_id, path in video_index.items():
-            try:
-                with open(path, encoding="utf-8") as f:
-                    info_json = json.load(f)
-            except (OSError, json.JSONDecodeError) as e:
-                logger.warning("recompute: skipping %s: %s", video_id, e)
-                skipped += 1
-                continue
+            if meta_cache is not None:
+                info_json = meta_cache.get(video_id)
+                if info_json is None:
+                    logger.warning("recompute: %s not in meta cache — skipping", video_id)
+                    skipped += 1
+                    continue
+            else:
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        info_json = json.load(f)
+                except (OSError, json.JSONDecodeError) as e:
+                    logger.warning("recompute: skipping %s: %s", video_id, e)
+                    skipped += 1
+                    continue
 
             c_matches, _ = match_video(info_json, collections)
             if c_matches:

@@ -47,13 +47,9 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ collections: data.collections }),
       });
-      const artworkFails = Object.entries(result.artwork ?? {})
-        .filter(([, v]) => !v.ok)
-        .map(([k]) => k);
-      const msg =
-        `Saved — ${result.matched} matched, ${result.unmatched} unmatched.` +
-        (artworkFails.length ? ` Artwork failed for: ${artworkFails.join(", ")}.` : "");
-      setStatus({ type: artworkFails.length ? "err" : "ok", msg });
+      const counts = `${result.matched} matched, ${result.unmatched} unmatched`;
+      const plexNote = result.plex_sync ? " Plex syncing in background." : "";
+      setStatus({ type: "ok", msg: `Saved — ${counts}.${plexNote}` });
       await load();
     } catch (e) {
       setStatus({ type: "err", msg: `Save failed: ${e.message}` });

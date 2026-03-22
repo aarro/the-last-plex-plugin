@@ -37,11 +37,13 @@ the-last-plex-plugin/
 
 yt-dlp names files as: `Video Title [VIDEO_ID].mp4` with a sidecar `Video Title [VIDEO_ID].info.json`.
 
-On startup, YAMP walks `YOUTUBE_DATA_PATH` and builds an in-memory index: `{video_id → info_json_path}`.
+On startup, YAMP walks `YOUTUBE_DATA_PATH` and builds two in-memory structures:
+- **`_video_index`**: `{video_id → info_json_path}` — used to locate `.info.json` files
+- **`_video_meta_cache`**: `{video_id → MATCH_FIELDS subset}` — pre-loaded metadata for the rule engine, eliminating disk I/O during collection recompute
 
 When Plex calls the match endpoint with a filename, `extract_video_id()` in `metadata.py` uses a regex to pull the ID from the `[...]` suffix.
 
-**New video self-registration:** when Plex matches a file not yet in the index, YAMP checks for the sidecar `.info.json` alongside the media file path that Plex provided (`_try_index_from_filename()`). If found, that single entry is added to the index immediately — no full directory walk required. This means new downloads are picked up on first Plex scan with no delay.
+**New video self-registration:** when Plex matches a file not yet in the index, YAMP checks for the sidecar `.info.json` alongside the media file path that Plex provided (`_try_index_from_filename()`). If found, that single entry is added to both `_video_index` and `_video_meta_cache` immediately — no full directory walk required. This means new downloads are picked up on first Plex scan with no delay.
 
 ### Plex API Flow
 
@@ -99,18 +101,28 @@ Lives at `YOUTUBE_DATA_PATH/_collection_map.json`. Schema:
 
 ### Collection Artwork
 
-Each collection can have an optional `image` URL. On `PUT /api/collections`, YAMP pushes that URL as the collection poster in Plex:
+Each collection can have an optional `image` URL. On `PUT /api/collections`, YAMP:
 
-1. Connect to Plex via `plexapi` (`PLEX_URL` + `PLEX_TOKEN`)
-2. Find the YAMP-managed library section (agent == `tv.plex.agents.custom.yamp`)
-3. Find the existing Plex collection by name, or create it by matching YAMP-tracked videos against the collection rules
-4. Call `plex_col.uploadPoster(url=image)` to set the poster
+1. Saves the new collection list to disk immediately
+2. Runs collection matching (skipped entirely if only image/name changed — rules must differ)
+3. Schedules artwork sync and Plex rescan as **background tasks** (non-blocking)
+4. Returns immediately with match counts and a `plex_sync: true` flag
+
+The artwork sync itself:
+1. Connects to Plex via `plexapi` (`PLEX_URL` + `PLEX_TOKEN`)
+2. Finds the YAMP-managed library section (agent == `tv.plex.agents.custom.yamp`)
+3. Finds the existing Plex collection by name, or creates it by matching YAMP-tracked videos against the collection rules
+4. Calls `plex_col.uploadPoster(url=image)` to set the poster
+
+Artwork is only synced for collections where rules or the image URL actually changed (not all collections with images on every save). Sync failures are logged server-side.
 
 The 📷 button in the UI is only shown when a collection has matched videos — this ensures the create-collection path always has items to work with.
 
+**Incremental recompute:** `diff_collections(old, new)` compares collection lists by name and returns the set of changed collections plus a `has_changes` flag. When `has_changes` is false (image/name-only edit), the recompute step is skipped entirely. When rules do change, `recompute_all_collections` uses `_video_meta_cache` instead of reading `.info.json` files from disk.
+
 **Pre-populating from Plex:** `GET /api/collections` fetches existing collection poster paths from Plex (via `_fetch_plex_collection_thumbs()`) and includes a `plex_thumb` field per collection. This is a relative proxy path (`/api/plex-collection-thumb?path=…`) so the Plex token never reaches the browser. In the UI, `plex_thumb` is used as a display-only preview (shown in the card header and image editor preview) but is never written into the URL input field or saved as `collection.image` — only absolute `https://` URLs entered by the user are persisted.
 
-If `PLEX_URL` / `PLEX_TOKEN` are not set, artwork push and `plex_thumb` fetch are skipped silently. Failures are surfaced per-collection in the `PUT /api/collections` response and shown in the UI status bar.
+If `PLEX_URL` / `PLEX_TOKEN` are not set, artwork push, Plex rescan, and `plex_thumb` fetch are all skipped silently.
 
 ### Thumbnail Proxy
 
@@ -176,9 +188,9 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 ## Key Files
 
 - `Makefile` — common dev tasks (test, build, dev, docker-*)
-- `provider/collection_map.py` — `match_video()`, `resolve_collections()`, `recompute_all_collections()`, `find_collection_map()`
+- `provider/collection_map.py` — `MATCH_FIELDS`, `diff_collections()`, `match_video()`, `resolve_collections()`, `recompute_all_collections()`, `find_collection_map()`
 - `provider/metadata.py` — `extract_video_id()`, `build_metadata_response()`
-- `provider/app.py` — all FastAPI routes; `_sync_collection_artwork()`, `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, `_fix_all_thumbnails()`, `_try_index_from_filename()`, thumbnail proxy + Plex collection thumb proxy
+- `provider/app.py` — all FastAPI routes; `build_meta_cache()`, `_do_rescan()`, `_sync_collection_artwork()`, `_sync_collection_artwork_bg()`, `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, `_fix_all_thumbnails()`, `_try_index_from_filename()`, thumbnail proxy + Plex collection thumb proxy
 - `provider/ui/src/App.jsx` — React root, state management, save/rescan/fix-thumbnails actions
 - `provider/ui/src/Collections.jsx` — collection editor (rules, name, poster image); plex_thumb shown as display-only preview
 - `provider/ui/src/DiscoverPanel.jsx` — video browser; click any tag to create a collection from it

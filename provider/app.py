@@ -15,12 +15,14 @@ from typing import Literal
 from urllib.parse import quote
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
 from collection_map import (
+    MATCH_FIELDS,
+    diff_collections,
     find_collection_map,
     load_map,
     match_video,
@@ -57,6 +59,7 @@ MATCH_KEY = "/library/metadata/matches"
 
 _video_index: dict[str, str] = {}
 _stem_index: dict[str, str] = {}  # info.json filename stem → video_id (match endpoint fallback)
+_video_meta_cache: dict[str, dict] = {}  # video_id → MATCH_FIELDS subset of info_json
 _last_rebuild: float = 0.0
 _REBUILD_COOLDOWN = 60.0
 
@@ -96,6 +99,24 @@ def build_index(data_path: str) -> tuple[dict[str, str], dict[str, str]]:
     return index, stem_index
 
 
+def build_meta_cache(video_index: dict[str, str]) -> dict[str, dict]:
+    """Read all indexed info_json files and cache the fields used for collection matching.
+
+    This eliminates disk I/O from recompute_all_collections on subsequent saves.
+    Called once at startup and after periodic index rebuilds.
+    """
+    cache: dict[str, dict] = {}
+    for video_id, path in video_index.items():
+        try:
+            with open(path, encoding="utf-8") as f:
+                info = json.load(f)
+            cache[video_id] = {k: info[k] for k in MATCH_FIELDS if k in info}
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("build_meta_cache: skipping %s: %s", video_id, e)
+    logger.info("build_meta_cache: cached %d videos", len(cache))
+    return cache
+
+
 def _try_index_from_filename(video_id: str, media_path: str) -> bool:
     """Try to index a single video by finding its .info.json alongside the media file.
 
@@ -111,6 +132,12 @@ def _try_index_from_filename(video_id: str, media_path: str) -> bool:
         _video_index[video_id] = str(candidate)
         _stem_index[candidate.name.removesuffix(".info.json")] = video_id
         logger.info("Indexed new video '%s' from sidecar: %s", video_id, candidate)
+        try:
+            with open(candidate, encoding="utf-8") as f:
+                info = json.load(f)
+            _video_meta_cache[video_id] = {k: info[k] for k in MATCH_FIELDS if k in info}
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("_try_index_from_filename: could not cache meta for %s: %s", video_id, e)
         return True
     return False
 
@@ -120,7 +147,7 @@ def _try_index_from_filename(video_id: str, media_path: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _video_index, _stem_index
+    global _video_index, _stem_index, _video_meta_cache
     if not os.path.isdir(DATA_PATH):
         logger.error(
             "YOUTUBE_DATA_PATH '%s' does not exist or is not a directory. Refusing to start.",
@@ -128,6 +155,7 @@ async def lifespan(app: FastAPI):
         )
         raise RuntimeError(f"YOUTUBE_DATA_PATH '{DATA_PATH}' is not a directory")
     _video_index, _stem_index = build_index(DATA_PATH)
+    _video_meta_cache = build_meta_cache(_video_index)
     yield
 
 
@@ -144,11 +172,12 @@ async def _get_info_json(video_id: str) -> dict:
     (rate-limited to once per 60 s) before retrying. Raises HTTP 404 if
     still not found after rebuild, or HTTP 500 on read/parse failure.
     """
-    global _video_index, _stem_index, _last_rebuild
+    global _video_index, _stem_index, _video_meta_cache, _last_rebuild
     path = _video_index.get(video_id)
     if not path:
         if time.monotonic() - _last_rebuild > _REBUILD_COOLDOWN:
             _video_index, _stem_index = await asyncio.to_thread(build_index, DATA_PATH)
+            _video_meta_cache = await asyncio.to_thread(build_meta_cache, _video_index)
             _last_rebuild = time.monotonic()
         path = _video_index.get(video_id)
     if not path:
@@ -472,7 +501,7 @@ async def api_get_collections():
 
 
 @app.put("/api/collections", dependencies=[Depends(_require_api_key)])
-async def api_put_collections(body: CollectionsBody):
+async def api_put_collections(body: CollectionsBody, background_tasks: BackgroundTasks):
     mapping_path = _collection_map_path()
     if not mapping_path:
         raise HTTPException(status_code=404, detail="Collection map not found")
@@ -481,28 +510,50 @@ async def api_put_collections(body: CollectionsBody):
     except (OSError, ValueError) as e:
         logger.error("api_put_collections: failed to load collection map at '%s': %s", mapping_path, e)
         raise HTTPException(status_code=500, detail="Could not read collection map") from e
-    data["collections"] = [c.model_dump() for c in body.collections]
+
+    old_cols = data.get("collections", [])
+    new_cols = [c.model_dump() for c in body.collections]
+    rules_changed, has_rule_changes = diff_collections(old_cols, new_cols)
+
+    data["collections"] = new_cols
     try:
         save_map(mapping_path, data)
     except OSError as e:
         logger.error("api_put_collections: failed to save collection map at '%s': %s", mapping_path, e)
         raise HTTPException(status_code=500, detail="Could not write collection map") from e
-    try:
-        stats = await asyncio.to_thread(recompute_all_collections, _video_index, mapping_path)
-    except (OSError, ValueError) as e:
-        logger.error("api_put_collections: recompute failed: %s", e)
-        raise HTTPException(
-            status_code=500,
-            detail="Collections saved but recompute failed — trigger a rescan to retry",
-        ) from e
 
-    artwork: dict = {}
+    if has_rule_changes:
+        cache = _video_meta_cache  # capture ref before thread dispatch
+        try:
+            stats = await asyncio.to_thread(
+                recompute_all_collections,
+                _video_index,
+                mapping_path,
+                cache,
+            )
+        except (OSError, ValueError) as e:
+            logger.error("api_put_collections: recompute failed: %s", e)
+            raise HTTPException(
+                status_code=500,
+                detail="Collections saved but recompute failed — trigger a rescan to retry",
+            ) from e
+    else:
+        stats = {
+            "matched": len(data.get("matched_ids", [])),
+            "unmatched": len(data.get("unmatched_ids", [])),
+            "skipped": 0,
+        }
+
+    # Schedule artwork sync for collections that changed (rules or image)
     if PLEX_URL and PLEX_TOKEN:
+        old_images = {c["name"]: c.get("image") for c in old_cols}
         for col in body.collections:
-            if col.image:
-                artwork[col.name] = await asyncio.to_thread(_sync_collection_artwork, col)
+            if col.image and (col.name in rules_changed or old_images.get(col.name) != col.image):
+                background_tasks.add_task(_sync_collection_artwork_bg, col)
+        background_tasks.add_task(_do_rescan_bg)
 
-    return {"ok": True, **stats, "artwork": artwork}
+    plex_sync = bool(PLEX_URL and PLEX_TOKEN)
+    return {"ok": True, **stats, "plex_sync": plex_sync}
 
 
 def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> tuple[list[dict], list[str]]:
@@ -740,12 +791,10 @@ async def api_plex_sections():
     return {"sections": sections}
 
 
-@app.post("/api/rescan", dependencies=[Depends(_require_api_key)])
-async def api_rescan():
-    """Trigger a Plex metadata refresh on all libraries using this provider."""
+async def _do_rescan() -> dict:
+    """Trigger a Plex metadata refresh on all YAMP-managed libraries. Returns result dict."""
     if not PLEX_URL or not PLEX_TOKEN:
-        raise HTTPException(status_code=400, detail="PLEX_URL and PLEX_TOKEN env vars not set")
-
+        return {"triggered_sections": [], "failed_sections": []}
     plex_headers = {"X-Plex-Token": PLEX_TOKEN, "Accept": "application/json"}
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
         sections = await _fetch_plex_sections(client)
@@ -779,17 +828,44 @@ async def api_rescan():
     return {"triggered_sections": triggered, "failed_sections": failed}
 
 
-def _fix_all_thumbnails() -> dict:
+async def _do_rescan_bg() -> None:
+    """Background wrapper for _do_rescan: logs failures instead of raising."""
+    try:
+        result = await _do_rescan()
+        if result.get("failed_sections"):
+            logger.error("Background rescan: failed sections: %s", result["failed_sections"])
+    except Exception:
+        logger.exception("Background rescan raised an unhandled exception")
+
+
+@app.post("/api/rescan", dependencies=[Depends(_require_api_key)])
+async def api_rescan():
+    """Trigger a Plex metadata refresh on all libraries using this provider."""
+    if not PLEX_URL or not PLEX_TOKEN:
+        raise HTTPException(status_code=400, detail="PLEX_URL and PLEX_TOKEN env vars not set")
+    return await _do_rescan()
+
+
+async def _sync_collection_artwork_bg(col) -> None:
+    """Background wrapper: sync artwork for one collection and log any errors."""
+    try:
+        result = await asyncio.to_thread(_sync_collection_artwork, col)
+        if not result.get("ok"):
+            logger.error("Background artwork sync failed for '%s': %s", col.name, result.get("error"))
+    except Exception:
+        logger.exception("Background artwork sync raised an unhandled exception for '%s'", col.name)
+
+
+def _fix_all_thumbnails(meta_cache: dict[str, dict] | None = None) -> dict:
     """Upload YAMP-proxied thumbnails for every video in YAMP-managed Plex sections.
 
     Synchronous — call via asyncio.to_thread. Returns {fixed, failed, skipped}.
+    meta_cache is passed in by the caller before thread dispatch to avoid reading a
+    global that may be replaced concurrently.
     """
     import requests.exceptions
     from plexapi.exceptions import PlexApiException
     from plexapi.server import PlexServer
-
-    if not YAMP_URL:
-        return {"fixed": 0, "failed": 0, "skipped": 0, "error": "YAMP_URL not set"}
 
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
@@ -819,8 +895,16 @@ def _fix_all_thumbnails() -> dict:
                 logger.warning("_fix_all_thumbnails: skipping item with unexpected ratingKey %r", video_id)
                 skipped += 1
                 continue
+            if YAMP_URL:
+                thumb_url = f"{YAMP_URL}/api/thumbnail/{video_id}"
+            else:
+                thumb_url = ((meta_cache or {}).get(video_id) or {}).get("thumbnail") or ""
+                if not thumb_url:
+                    logger.warning("_fix_all_thumbnails: no thumbnail URL for %r — skipping", video_id)
+                    skipped += 1
+                    continue
             try:
-                item.uploadPoster(url=f"{YAMP_URL}/api/thumbnail/{video_id}")
+                item.uploadPoster(url=thumb_url)
                 fixed += 1
             except (PlexApiException, requests.exceptions.RequestException) as e:
                 logger.error("_fix_all_thumbnails: uploadPoster failed for %r: %s", video_id, e)
@@ -835,9 +919,8 @@ async def api_fix_thumbnails():
     """Push YAMP-proxied thumbnails to Plex for all videos in YAMP-managed libraries."""
     if not PLEX_URL or not PLEX_TOKEN:
         raise HTTPException(status_code=400, detail="PLEX_URL and PLEX_TOKEN env vars not set")
-    if not YAMP_URL:
-        raise HTTPException(status_code=400, detail="YAMP_URL env var not set")
-    result = await asyncio.to_thread(_fix_all_thumbnails)
+    cache = _video_meta_cache  # capture ref before thread dispatch
+    result = await asyncio.to_thread(_fix_all_thumbnails, cache)
     if "error" in result:
         raise HTTPException(status_code=502, detail=result["error"])
     return result
@@ -846,8 +929,9 @@ async def api_fix_thumbnails():
 @app.post("/api/index/rebuild", dependencies=[Depends(_require_api_key)])
 async def api_rebuild_index():
     """Force a rebuild of the in-memory video index."""
-    global _video_index, _stem_index
+    global _video_index, _stem_index, _video_meta_cache
     _video_index, _stem_index = await asyncio.to_thread(build_index, DATA_PATH)
+    _video_meta_cache = await asyncio.to_thread(build_meta_cache, _video_index)
     if not _video_index:
         logger.warning("Rebuilt index is empty — no videos found under %s", DATA_PATH)
     return {"indexed": len(_video_index)}

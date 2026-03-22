@@ -14,10 +14,11 @@ Plex deprecated their legacy Python plugin framework in 2026. This replaces the 
 - **Thumbnail proxy** — YAMP serves all video thumbnails to Plex (proxying YouTube when no local file exists), so Plex doesn't need direct access to YouTube CDN
 - **Collection rules** driven by tags, title substrings, or channel name
 - **Collection poster images** — set a URL in the UI and YAMP pushes it to Plex as the collection artwork on save; existing Plex posters are pre-loaded when you open the editor
+- **Fast saves** — collection matching uses an in-memory metadata cache (no disk I/O); image/name-only edits skip recompute entirely; Plex artwork sync and rescan run in the background so saves return immediately
 - **Web UI** at `http://localhost:8765` to add/edit/delete collections and rules
-- **Discover panel** — browse unmatched (or all) videos, search by title/channel/tag, click any tag to instantly create a collection from it
+- **Discover panel** — browse unmatched (or all) videos, search by title/channel/tag, click any tag to instantly create a collection from it; click a video thumbnail in a collection to search for it in the Discover panel
 - **Rescan button** — trigger a Plex metadata refresh directly from the UI
-- **Fix Thumbnails button** — backfill YAMP-proxied thumbnails for all existing videos (one-time migration; new downloads are handled automatically)
+- **Fix Thumbnails button** — backfill thumbnails for all existing videos (uses YAMP proxy if `YAMP_URL` is set, otherwise falls back to YouTube URLs directly)
 - **Makefile** for common dev tasks: `make test`, `make build`, `make dev`, `make docker-up`, etc.
 - **Docker Compose** setup with Plex + MeTube + YAMP all sharing one volume
 

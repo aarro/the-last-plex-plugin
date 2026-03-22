@@ -39,6 +39,7 @@ def patched_app(tmp_data, monkeypatch):
     stem_index = {info["id"]: info["id"]}  # stem of "{id}.info.json" is "{id}"
     monkeypatch.setattr(yamp_app, "_video_index", index)
     monkeypatch.setattr(yamp_app, "_stem_index", stem_index)
+    monkeypatch.setattr(yamp_app, "_video_meta_cache", {})  # empty → falls back to disk reads
     monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
     return index, info, tmp_path
 

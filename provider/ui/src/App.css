@@ -53,8 +53,18 @@ header {
   padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
 }
+.header-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .header-logo {
   display: block;
+}
+.header-version {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.3px;
 }
 
 .stats {

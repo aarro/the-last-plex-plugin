@@ -15,6 +15,7 @@ async function fetchJson(url, options) {
 export default function App() {
   const [data, setData] = useState(null);
   const [videos, setVideos] = useState([]);
+  const [version, setVersion] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -31,6 +32,10 @@ export default function App() {
 
   useEffect(() => {
     load();
+    fetch("/api/version")
+      .then((r) => r.json())
+      .then((j) => setVersion(j.version))
+      .catch(() => {});
   }, [load]);
 
   const setCollections = (collections) => {
@@ -100,7 +105,10 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <img src="/logo.svg" alt="YAMP" height="40" className="header-logo" />
+        <div className="header-brand">
+          <img src="/logo.svg" alt="YAMP" height="40" className="header-logo" />
+          {version && <span className="header-version">{version}</span>}
+        </div>
         <div className="stats">
           <div className="stat">
             <div className="stat-value">{data.matched_count}</div>

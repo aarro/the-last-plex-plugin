@@ -11,6 +11,9 @@ RUN bun run build
 # ── Stage 2: Python server ────────────────────────────────────────────────────
 FROM python:3.12-slim AS server
 
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 WORKDIR /app
 
 # Install uv

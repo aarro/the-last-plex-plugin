@@ -50,6 +50,7 @@ PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
 YAMP_URL = os.environ.get("YAMP_URL", "").rstrip("/")
 PORT = int(os.environ.get("PORT", "8765"))
 API_KEY = os.environ.get("API_KEY", "")
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 METADATA_KEY = "/library/metadata"
 MATCH_KEY = "/library/metadata/matches"
@@ -463,6 +464,12 @@ class CollectionsBody(BaseModel):
         return v
 
 
+@app.get("/api/version")
+async def api_version():
+    """Return the running YAMP version."""
+    return {"version": APP_VERSION}
+
+
 @app.get("/api/collections")
 async def api_get_collections():
     mapping_path = _collection_map_path()
@@ -649,14 +656,22 @@ async def _fetch_plex_sections(client: httpx.AsyncClient) -> list[dict]:
     return data.get("MediaContainer", {}).get("Directory", [])
 
 
+def _video_id_from_plex_item(item) -> str | None:
+    """Extract the YAMP video ID from a plexapi library item, or None if not a YAMP item."""
+    guid = getattr(item, "guid", "") or ""
+    prefix = f"{IDENTIFIER}://movie/"
+    if guid.startswith(prefix):
+        return guid[len(prefix) :].rstrip("/") or None
+    return None
+
+
 def _find_matching_plex_items(section, col_spec: list) -> list:
     """Return Plex video objects in `section` whose info_json matches col_spec."""
     results = []
     for item in section.all():
-        guid = getattr(item, "guid", "") or ""
-        if "youtube-" not in guid:
+        video_id = _video_id_from_plex_item(item)
+        if not video_id:
             continue
-        video_id = guid.split("youtube-")[-1].rstrip("/")
         info_path = _video_index.get(video_id)
         if not info_path:
             continue
@@ -890,9 +905,11 @@ def _fix_all_thumbnails(meta_cache: dict[str, dict] | None = None) -> dict:
             failed += 1
             continue
         for item in items:
-            video_id = item.ratingKey
-            if not _validate_video_id(video_id):
-                logger.warning("_fix_all_thumbnails: skipping item with unexpected ratingKey %r", video_id)
+            video_id = _video_id_from_plex_item(item)
+            if not video_id:
+                logger.warning(
+                    "_fix_all_thumbnails: skipping item with unrecognised guid %r", getattr(item, "guid", "")
+                )  # noqa: E501
                 skipped += 1
                 continue
             if YAMP_URL:

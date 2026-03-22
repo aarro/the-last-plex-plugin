@@ -1,4 +1,4 @@
-# YAMP — YouTube Auto Metadata Provider
+# YAMP — Yet Another Media Provider
 # Template docker-compose with all three services sharing a youtube downloads volume.
 #
 # Setup:

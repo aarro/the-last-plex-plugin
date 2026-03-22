@@ -127,6 +127,7 @@ A `Makefile` at the repo root wraps all common tasks:
 
 ```bash
 make test          # run pytest
+make lint          # lint + auto-fix Python (ruff) and UI (biome)
 make build         # build React UI
 make dev           # backend dev server (port 8765, auto-reload)
 make dev-ui        # UI dev server (proxies /api → localhost:8765)
@@ -143,7 +144,7 @@ make logs          # tail Docker logs
 uv --directory provider run uvicorn app:app --reload --port 8765
 
 # UI
-bun --cwd provider/ui run dev
+bun run --cwd=provider/ui dev
 
 # Tests
 uv --directory provider run pytest

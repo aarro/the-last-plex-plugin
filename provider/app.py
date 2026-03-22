@@ -1,5 +1,5 @@
 """
-YAMP — YouTube Auto Metadata Provider
+YAMP — Yet Another Media Provider
 A Plex Custom Metadata Provider for yt-dlp downloads.
 """
 
@@ -205,7 +205,7 @@ async def get_provider():
     return {
         "MediaProvider": {
             "identifier": IDENTIFIER,
-            "title": "YAMP — YouTube Auto Metadata Provider",
+            "title": "YAMP — Yet Another Media Provider",
             "version": "1.0.0",
             "Types": [{"type": 1, "Scheme": [{"scheme": IDENTIFIER}]}],
             "Feature": [

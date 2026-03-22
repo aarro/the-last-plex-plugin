@@ -53,13 +53,6 @@ header {
   padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
 }
-header h1 {
-  font-size: 22px;
-  font-weight: 700;
-}
-header h1 span {
-  color: var(--accent);
-}
 
 .stats {
   display: flex;

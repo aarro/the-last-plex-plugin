@@ -1,7 +1,7 @@
 [project]
 name = "yamp"
 version = "0.1.0"
-description = "YouTube Auto Metadata Provider — a Plex Custom Metadata Provider for yt-dlp downloads"
+description = "Yet Another Media Provider — a Plex Custom Metadata Provider for yt-dlp downloads"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

@@ -7,7 +7,7 @@ UI_DIR       := provider/ui
 test:
 	uv --directory $(PROVIDER_DIR) run pytest
 
-# Lint + auto-fix all Python (ruff check + format)
+# Lint + auto-fix Python (ruff) and UI (biome)
 lint:
 	uv --directory $(PROVIDER_DIR) run ruff check --fix .
 	uv --directory $(PROVIDER_DIR) run ruff format .
@@ -15,7 +15,7 @@ lint:
 
 # Build the React UI
 build:
-	bun --cwd $(UI_DIR) run build
+	bun run --cwd=$(UI_DIR) build
 
 # Run backend dev server (with auto-reload)
 dev:
@@ -23,7 +23,7 @@ dev:
 
 # Run UI dev server (proxies /api → localhost:8765)
 dev-ui:
-	bun --cwd $(UI_DIR) run dev
+	bun run --cwd=$(UI_DIR) dev
 
 # Docker
 docker-build:

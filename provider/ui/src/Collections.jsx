@@ -463,6 +463,7 @@ function CollectionCard({
 
           {/* Full-width row 3: rules + video thumbs + footer */}
           <div className="card-body-bottom" {...stopBubble}>
+            <p className="section-heading">Rules</p>
             {collection.rules.length === 0 && <p className="empty">No rules — add one below.</p>}
             <div className="rules">
               {collection.rules.map((rule, i) => (
@@ -475,6 +476,9 @@ function CollectionCard({
 
             {/* Matched video thumbnails */}
             <div className="card-thumb-section">
+              <p className="section-heading" style={{ marginTop: 0 }}>
+                Clips
+              </p>
               <ThumbGrid videos={matched} onVideoSearch={onVideoSearch} />
             </div>
 

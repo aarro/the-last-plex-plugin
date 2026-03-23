@@ -52,6 +52,16 @@ logger = logging.getLogger(__name__)
 # ET.ParseError does NOT absorb unrelated SyntaxErrors (only the reverse is true).
 _PLEX_ERRS = (PlexApiException, requests.exceptions.RequestException, ET.ParseError)
 
+# Optional dependency: yt-dlp is only needed for channel art fetching.
+# Imported at module level so the "not installed" warning is logged exactly once at startup.
+try:
+    import yt_dlp as _yt_dlp
+
+    _YT_DLP_AVAILABLE = True
+except ImportError:
+    _yt_dlp = None  # type: ignore[assignment]
+    _YT_DLP_AVAILABLE = False
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 IDENTIFIER = "tv.plex.agents.custom.yamp"
@@ -213,25 +223,22 @@ def _fetch_channel_art(uploader_url: str) -> dict | None:
     """
     if "youtube.com" not in uploader_url:
         return None
+    if not _YT_DLP_AVAILABLE:
+        return None
     try:
-        import yt_dlp
-
         ydl_opts = {
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
             "extract_flat": True,
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with _yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[union-attr]
             info = ydl.extract_info(uploader_url, download=False) or {}
         return {
             "channel": info.get("channel") or info.get("uploader") or "",
             "avatar_url": info.get("thumbnail") or "",
             "banner_url": info.get("tvBanner") or info.get("banner") or "",
         }
-    except ImportError:
-        logger.error("_fetch_channel_art: yt-dlp is not installed — cannot fetch channel art")
-        return None
     except Exception:
         logger.exception("_fetch_channel_art: unexpected error for '%s'", uploader_url)
         return None
@@ -324,7 +331,10 @@ async def _prefetch_channel_art_bg(collection_names: list[str]) -> None:
                         _channel_art_cache[url] = result
                         logger.info("_prefetch_channel_art_bg: cached art for '%s'", url)
                     else:
-                        # fetch returned None (e.g. yt-dlp not installed or import failed)
+                        logger.debug(
+                            "_prefetch_channel_art_bg: no art fetched for '%s' (non-YouTube URL or no result)",
+                            url,
+                        )
                         _channel_art_cache[url] = _FETCH_ERROR_SENTINEL
     finally:
         _prefetch_in_progress.difference_update(names_to_run)
@@ -344,6 +354,9 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"YOUTUBE_DATA_PATH '{DATA_PATH}' is not a directory")
     _video_index, _stem_index = build_index(DATA_PATH)
     _video_meta_cache = build_meta_cache(_video_index)
+
+    if not _YT_DLP_AVAILABLE:
+        logger.warning("yt-dlp is not installed — channel art fetching disabled")
 
     # Pre-fetch channel art for all collections with matched videos in the background.
     mapping_path = _collection_map_path()
@@ -396,6 +409,9 @@ async def _get_info_json(video_id: str) -> dict:
     except json.JSONDecodeError as e:
         logger.error("Failed to parse info_json for '%s' at '%s': %s", video_id, path, e)
         raise HTTPException(status_code=500, detail=f"Corrupt metadata for '{video_id}'") from e
+    except UnicodeDecodeError as e:
+        logger.error("Failed to decode info_json for '%s' at '%s': %s", video_id, path, e)
+        raise HTTPException(status_code=500, detail=f"Corrupt metadata (encoding error) for '{video_id}'") from e
 
 
 def _collection_map_path() -> str | None:
@@ -869,7 +885,12 @@ def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> t
         else:
             thumbnail = info_json.get("thumbnail", "")
 
-        c_matches, _ = match_video(info_json, collections)
+        try:
+            c_matches, _ = match_video(info_json, collections)
+        except Exception as e:
+            logger.warning("api_videos: skipping %s (match error): %s", video_id, e)
+            skipped_ids.append(video_id)
+            continue
 
         upload_date_raw = info_json.get("upload_date", "")
         try:
@@ -997,7 +1018,11 @@ def _find_matching_plex_items(section, col_spec: list) -> list:
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("_find_matching_plex_items: skipping '%s' at '%s': %s", video_id, info_path, e)
             continue
-        matches, _ = match_video(info_json, col_spec)
+        try:
+            matches, _ = match_video(info_json, col_spec)
+        except Exception as e:
+            logger.warning("_find_matching_plex_items: skipping '%s' (match error): %s", video_id, e)
+            continue
         if matches:
             results.append(item)
     return results
@@ -1111,9 +1136,10 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
         return {"ok": False, "created": created, "error": errors}
 
     # Collection not found or listing failed in every YAMP section.
-    # last_section_error is always set here: the loop ran at least once (yamp_sections
-    # is guaranteed non-empty above) and every continue path sets it.
-    return last_section_error  # type: ignore[return-value]
+    # Guaranteed non-None: loop ran at least once (yamp_sections is non-empty above)
+    # and every continue path sets last_section_error.
+    assert last_section_error is not None
+    return last_section_error
 
 
 _PLEX_THUMB_PATH_RE = re.compile(r"^/library/(collections|metadata)/\d+/(thumb|composite)(/\d+(\?[a-zA-Z0-9=&]+)?)?$")
@@ -1250,7 +1276,13 @@ async def _sync_collection_artwork_bg(col) -> None:
                     _ARTWORK_RETRY_DELAY,
                 )
                 await asyncio.sleep(_ARTWORK_RETRY_DELAY)
-                result = await asyncio.to_thread(_sync_collection_artwork, col)
+                try:
+                    result = await asyncio.to_thread(_sync_collection_artwork, col)
+                except Exception:
+                    logger.exception(
+                        "Background artwork sync raised an unhandled exception on retry for '%s'", col.name
+                    )
+                    return
                 if not result.get("ok"):
                     if result.get("not_found_in_plex"):
                         logger.error(

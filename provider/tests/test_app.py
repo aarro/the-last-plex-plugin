@@ -1966,49 +1966,24 @@ async def test_put_collections_art_field_triggers_artwork_sync(patched_app, monk
 
 
 def test_fetch_channel_art_non_youtube_url():
-    """Non-YouTube URL returns None without importing or calling yt-dlp."""
-    import builtins
-
+    """Non-YouTube URL returns None immediately (before any yt-dlp check)."""
     from app import _fetch_channel_art
 
-    real_import = builtins.__import__
-
-    def _raise_if_yt_dlp(name, *args, **kwargs):
-        if name == "yt_dlp":
-            raise AssertionError("yt_dlp must not be imported for non-YouTube URLs")
-        return real_import(name, *args, **kwargs)
-
-    builtins.__import__ = _raise_if_yt_dlp
-    try:
-        result = _fetch_channel_art("https://vimeo.com/channels/foo")
-    finally:
-        builtins.__import__ = real_import
-
+    result = _fetch_channel_art("https://vimeo.com/channels/foo")
     assert result is None
 
 
-def test_fetch_channel_art_import_error(monkeypatch):
-    """ImportError (yt-dlp not installed) returns None and logs an error."""
-    import builtins
-
+def test_fetch_channel_art_yt_dlp_unavailable(monkeypatch):
+    """When _YT_DLP_AVAILABLE is False, returns None without calling yt-dlp."""
     from app import _fetch_channel_art
 
-    real_import = builtins.__import__
-
-    def _block_yt_dlp(name, *args, **kwargs):
-        if name == "yt_dlp":
-            raise ImportError("No module named 'yt_dlp'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _block_yt_dlp)
+    monkeypatch.setattr(yamp_app, "_YT_DLP_AVAILABLE", False)
     result = _fetch_channel_art("https://www.youtube.com/@TestChannel")
     assert result is None
 
 
-def test_fetch_channel_art_exception_returns_none():
+def test_fetch_channel_art_exception_returns_none(monkeypatch):
     """Unexpected exception from yt-dlp returns None (logged, not raised)."""
-    from unittest.mock import patch
-
     from app import _fetch_channel_art
 
     mock_ydl = MagicMock()
@@ -2019,8 +1994,9 @@ def test_fetch_channel_art_exception_returns_none():
     mock_module = MagicMock()
     mock_module.YoutubeDL.return_value = mock_ydl
 
-    with patch.dict("sys.modules", {"yt_dlp": mock_module}):
-        result = _fetch_channel_art("https://www.youtube.com/@TestChannel")
+    monkeypatch.setattr(yamp_app, "_yt_dlp", mock_module)
+    monkeypatch.setattr(yamp_app, "_YT_DLP_AVAILABLE", True)
+    result = _fetch_channel_art("https://www.youtube.com/@TestChannel")
 
     assert result is None
 
@@ -2048,16 +2024,18 @@ async def test_prefetch_channel_art_bg_caches_error_sentinel(monkeypatch):
     from unittest.mock import patch
 
     url = "https://www.youtube.com/@ErrorChannel"
-    yamp_app._channel_art_cache.pop(url, None)
+    # Use a fresh cache so the function actually attempts the fetch (not a cache hit)
+    # and monkeypatch restores the original on teardown.
+    fresh_cache: dict = {}
+    monkeypatch.setattr(yamp_app, "_channel_art_cache", fresh_cache)
 
     monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _: [url])
 
     with patch("app._fetch_channel_art", return_value=None):
         await yamp_app._prefetch_channel_art_bg(["TestCollection"])
 
-    assert url in yamp_app._channel_art_cache
-    assert yamp_app._channel_art_cache[url] is yamp_app._FETCH_ERROR_SENTINEL
-    yamp_app._channel_art_cache.pop(url, None)
+    assert url in fresh_cache
+    assert fresh_cache[url] is yamp_app._FETCH_ERROR_SENTINEL
 
 
 # ── GET /api/channel-art — fetch_error flag ───────────────────────────────────
@@ -2067,7 +2045,7 @@ async def test_api_channel_art_fetch_error_flag(patched_app, monkeypatch):
     """If cache holds a _fetch_error sentinel, response includes fetch_error: true."""
     url = "https://www.youtube.com/@BrokenChannel"
     monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _: [url])
-    yamp_app._channel_art_cache[url] = yamp_app._FETCH_ERROR_SENTINEL
+    monkeypatch.setitem(yamp_app._channel_art_cache, url, yamp_app._FETCH_ERROR_SENTINEL)
 
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/channel-art?collection=TestCollection")
@@ -2077,7 +2055,6 @@ async def test_api_channel_art_fetch_error_flag(patched_app, monkeypatch):
     assert data["fetch_error"] is True
     assert data["options"] == []
     assert data["pending"] is False
-    yamp_app._channel_art_cache.pop(url, None)
 
 
 # ── _get_channel_urls_for_collection — internal branches ─────────────────────
@@ -2341,7 +2318,7 @@ async def test_api_channel_art_pending_and_fetch_error(patched_app, monkeypatch)
     missing_url = "https://www.youtube.com/@PendingChannel"
 
     monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _: [errored_url, missing_url])
-    yamp_app._channel_art_cache[errored_url] = yamp_app._FETCH_ERROR_SENTINEL
+    monkeypatch.setitem(yamp_app._channel_art_cache, errored_url, yamp_app._FETCH_ERROR_SENTINEL)
     yamp_app._channel_art_cache.pop(missing_url, None)
 
     mock_prefetch = AsyncMock()
@@ -2355,4 +2332,122 @@ async def test_api_channel_art_pending_and_fetch_error(patched_app, monkeypatch)
     assert data["fetch_error"] is True
     assert data["pending"] is True
     assert data["options"] == []
-    yamp_app._channel_art_cache.pop(errored_url, None)
+
+
+# ── _prefetch_channel_art_bg — URL resolution exception continues ──────────────
+
+
+async def test_prefetch_channel_art_bg_url_error_continues(monkeypatch):
+    """Exception in _get_channel_urls_for_collection for col A → col B still processed."""
+    url_b = "https://www.youtube.com/@ChannelB"
+    call_count = [0]
+
+    def _urls_or_raise(name):
+        call_count[0] += 1
+        if name == "CollectionA":
+            raise RuntimeError("lookup failed")
+        return [url_b]
+
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", _urls_or_raise)
+    fresh_cache: dict = {}
+    monkeypatch.setattr(yamp_app, "_channel_art_cache", fresh_cache)
+
+    from unittest.mock import patch
+
+    with patch("app._fetch_channel_art", return_value={"channel": "B", "avatar_url": "", "banner_url": ""}):
+        await yamp_app._prefetch_channel_art_bg(["CollectionA", "CollectionB"])
+
+    assert call_count[0] == 2, "both collections should have been attempted"
+    assert fresh_cache.get(url_b) == {
+        "channel": "B",
+        "avatar_url": "",
+        "banner_url": "",
+    }
+
+
+# ── _sync_collection_artwork — all sections exhausted ────────────────────────
+
+
+def test_sync_collection_artwork_all_sections_fail_plex_errs(monkeypatch):
+    """All YAMP sections fail with _PLEX_ERRS → last_section_error returned, not None."""
+    import requests
+
+    col = yamp_app.CollectionModel(name="Jazz", rules=[], image="https://example.com/poster.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    section1 = MagicMock()
+    section1.agent = yamp_app.IDENTIFIER
+    section1.collection.side_effect = requests.exceptions.ConnectionError("refused")
+    section2 = MagicMock()
+    section2.agent = yamp_app.IDENTIFIER
+    section2.collection.side_effect = requests.exceptions.ConnectionError("refused")
+
+    mock_server = MagicMock()
+    mock_server.library.sections.return_value = [section1, section2]
+
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result is not None
+    assert result["ok"] is False
+    assert isinstance(result.get("error"), str)
+
+
+# ── _format_sync_error — partial success branch ───────────────────────────────
+
+
+def test_format_sync_error_partial_success_branch():
+    """When some fields succeeded, _format_sync_error returns a 'partial failure' message."""
+    col = yamp_app.CollectionModel(
+        name="Test",
+        rules=[],
+        image="https://example.com/poster.jpg",
+        art="https://example.com/bg.jpg",
+    )
+    # image succeeded (not in error dict), art failed
+    error = {"art": "uploadArt failed: some error"}
+    result = yamp_app._format_sync_error(col, error)
+    assert "partial failure" in result
+    assert "image" in result  # succeeded field included
+    assert "art" in result  # failed field included
+
+
+# ── GET /api/channel-art — unexpected exception → 500 ────────────────────────
+
+
+async def test_api_channel_art_get_urls_raises(patched_app, monkeypatch):
+    """If _get_channel_urls_for_collection raises, the endpoint returns HTTP 500."""
+
+    def _raise(_name):
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", _raise)
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/channel-art?collection=TestCollection")
+
+    assert resp.status_code == 500
+
+
+# ── GET /api/collections — OSError path ──────────────────────────────────────
+
+
+async def test_api_get_collections_oserror(patched_app, monkeypatch):
+    """OSError reading collection map → 500 with 'check file permissions' in detail."""
+    _, _, tmp_path = patched_app
+    (tmp_path / "_collection_map.json").write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+
+    def _raise_os_error(_path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(yamp_app, "load_map", _raise_os_error)
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/collections")
+
+    assert resp.status_code == 500
+    assert "file permissions" in resp.json()["detail"]

@@ -19,6 +19,7 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [rescanning, setRescanning] = useState(false);
   const [fixingThumbs, setFixingThumbs] = useState(false);
+  const [rebuildingIndex, setRebuildingIndex] = useState(false);
   const [search, setSearch] = useState("");
   const [loadError, setLoadError] = useState(null);
 
@@ -97,6 +98,24 @@ export default function App() {
     }
   };
 
+  const rebuildIndex = async () => {
+    setRebuildingIndex(true);
+    setStatus(null);
+    try {
+      const json = await fetchJson("/api/index/rebuild", { method: "POST" });
+      setStatus({ type: "ok", msg: `Index rebuilt — ${json.indexed} videos indexed.` });
+      try {
+        await load();
+      } catch (e) {
+        console.error("Post-rebuild reload failed:", e);
+      }
+    } catch (e) {
+      setStatus({ type: "err", msg: `Index rebuild failed: ${e.message}` });
+    } finally {
+      setRebuildingIndex(false);
+    }
+  };
+
   const fixThumbnails = async () => {
     setFixingThumbs(true);
     setStatus(null);
@@ -170,6 +189,15 @@ export default function App() {
         {status && <span className={`status ${status.type}`}>{status.msg}</span>}
         <button type="button" className="btn-ghost" onClick={fixThumbnails} disabled={fixingThumbs}>
           {fixingThumbs ? "Fixing…" : "Fix Thumbnails"}
+        </button>
+        <button
+          type="button"
+          className="btn-ghost"
+          onClick={rebuildIndex}
+          disabled={rebuildingIndex}
+          title="Re-walk the data directory and rebuild YAMP's in-memory video index"
+        >
+          {rebuildingIndex ? "Rebuilding…" : "Rebuild Index"}
         </button>
         <button
           type="button"

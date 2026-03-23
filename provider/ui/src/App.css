@@ -237,8 +237,16 @@ section h2 {
 .form-group {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  margin-bottom: 12px;
+  gap: 7px;
+  margin-bottom: 16px;
+}
+.section-heading {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin: 16px 0 0;
 }
 .form-group label {
   font-size: 12px;
@@ -598,6 +606,9 @@ select option {
   gap: 8px;
   align-items: center;
   margin-top: 14px;
+}
+.card-footer-row .btn-primary {
+  margin-left: auto;
 }
 
 .field-error {

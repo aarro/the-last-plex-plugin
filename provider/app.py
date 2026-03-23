@@ -249,23 +249,52 @@ def _fetch_channel_art(uploader_url: str, data_path: str | None = None) -> dict 
         with _yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[union-attr]
             info = ydl.extract_info(uploader_url, download=False) or {}
         channel_name = info.get("channel") or info.get("uploader") or ""
+        channel_id = info.get("channel_id") or ""
         if data_path and channel_name:
             safe_name = _sanitize_filename(channel_name)
-            channel_dir = os.path.join(data_path, channel_name)
-            if os.path.isdir(channel_dir):
-                save_path = os.path.join(channel_dir, f"{safe_name}.channel.json")
-            else:
-                save_path = os.path.join(data_path, f"{safe_name}.channel.json")
+            # Prefer a subdirectory whose name ends with [channel_id] (yt-dlp's default
+            # output template produces names like "Amber_Mark [UCMpn3xVjGSB8zztwLjENjvw]").
+            # Fall back to an exact channel_name match, then save at the data root.
+            channel_dir: str | None = None
+            if channel_id:
+                suffix = f"[{channel_id}]"
+                try:
+                    for entry in os.scandir(data_path):
+                        if entry.is_dir() and entry.name.endswith(suffix):
+                            channel_dir = entry.path
+                            break
+                except OSError:
+                    pass
+            if channel_dir is None:
+                direct = os.path.join(data_path, channel_name)
+                if os.path.isdir(direct):
+                    channel_dir = direct
+            save_dir = channel_dir if channel_dir is not None else data_path
+            save_path = os.path.join(save_dir, f"{safe_name}.channel.json")
+            info_to_save = {k: v for k, v in info.items() if k != "entries"}
             try:
                 with open(save_path, "w", encoding="utf-8") as fh:
-                    json.dump(info, fh, indent=2, ensure_ascii=False)
+                    json.dump(info_to_save, fh, indent=2, ensure_ascii=False)
                 logger.debug("_fetch_channel_art: saved channel JSON to '%s'", save_path)
             except OSError as e:
                 logger.warning("_fetch_channel_art: could not save channel JSON to '%s': %s", save_path, e)
+        # Prefer "uncropped" thumbnail variants for best quality.
+        thumbnails = info.get("thumbnails") or []
+        avatar_url = (
+            next((t["url"] for t in thumbnails if t.get("id") == "avatar_uncropped" and t.get("url")), None)
+            or info.get("thumbnail")
+            or ""
+        )
+        banner_url = (
+            next((t["url"] for t in thumbnails if t.get("id") == "banner_uncropped" and t.get("url")), None)
+            or info.get("tvBanner")
+            or info.get("banner")
+            or ""
+        )
         return {
             "channel": channel_name,
-            "avatar_url": info.get("thumbnail") or "",
-            "banner_url": info.get("tvBanner") or info.get("banner") or "",
+            "avatar_url": avatar_url,
+            "banner_url": banner_url,
         }
     except Exception:
         logger.exception("_fetch_channel_art: unexpected error for '%s'", uploader_url)

@@ -204,6 +204,10 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 | `API_KEY`            | —        | Bearer token for write API endpoints (`PUT /api/collections`, `POST /api/rescan`, `POST /api/thumbnails/fix`, `POST /api/index/rebuild`). If unset, those endpoints are open (backward-compatible). |
 | `YAMP_URL`           | —        | Override for YAMP's own base URL. Normally not needed — YAMP derives its URL from the incoming request (Plex already knows it). Set this only if YAMP is behind a reverse proxy that rewrites the `Host` header. |
 
+## Reference Docs
+
+- `docs/yt-dlp-json-reference.md` — Annotated examples of `*.info.json` (per-video) and `*.channel.json` (per-channel). Covers every field YAMP reads, the full thumbnail ID taxonomy (`avatar_uncropped`, `banner_uncropped`, numeric crop variants), and how `_fetch_channel_art` decides where to save the channel JSON.
+
 ## Key Files
 
 - `Makefile` — common dev tasks (test, build, dev, docker-*)

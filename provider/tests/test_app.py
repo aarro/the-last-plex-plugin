@@ -2078,8 +2078,79 @@ def test_fetch_channel_art_saves_json_flat(tmp_path, monkeypatch):
     assert data["channel"] == "Studio Bruxelles"
 
 
+def test_fetch_channel_art_saves_json_excludes_entries(tmp_path, monkeypatch):
+    """The 'entries' key (video listing) is stripped before saving channel.json."""
+    from app import _fetch_channel_art
+
+    _make_yt_dlp_mock(
+        monkeypatch,
+        {"channel": "Test Channel", "thumbnail": "https://img/av.jpg", "entries": [{"id": "vid1"}, {"id": "vid2"}]},
+    )
+
+    _fetch_channel_art("https://www.youtube.com/@TestChannel", data_path=str(tmp_path))
+
+    saved = tmp_path / "Test Channel.channel.json"
+    assert saved.exists()
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    assert "entries" not in data, "entries list must be stripped to keep channel.json small"
+    assert data["channel"] == "Test Channel"
+
+
+def test_fetch_channel_art_prefers_uncropped_thumbnails(tmp_path, monkeypatch):
+    """avatar_uncropped and banner_uncropped thumbnail variants are preferred over fallbacks."""
+    from app import _fetch_channel_art
+
+    thumbnails = [
+        {"id": "avatar_uncropped", "url": "https://img/avatar_uncropped.jpg", "preference": 1},
+        {"id": "banner_uncropped", "url": "https://img/banner_uncropped.jpg", "preference": 1},
+        {"id": "0", "url": "https://img/cropped.jpg"},
+    ]
+    _make_yt_dlp_mock(
+        monkeypatch,
+        {"channel": "Test Channel", "thumbnail": "https://img/cropped.jpg", "thumbnails": thumbnails},
+    )
+
+    result = _fetch_channel_art("https://www.youtube.com/@TestChannel")
+
+    assert result is not None
+    assert result["avatar_url"] == "https://img/avatar_uncropped.jpg"
+    assert result["banner_url"] == "https://img/banner_uncropped.jpg"
+
+
+def test_fetch_channel_art_falls_back_when_no_uncropped(monkeypatch):
+    """Falls back to info['thumbnail'] when no avatar_uncropped thumbnail exists."""
+    from app import _fetch_channel_art
+
+    _make_yt_dlp_mock(monkeypatch, {"channel": "Test Channel", "thumbnail": "https://img/regular.jpg"})
+
+    result = _fetch_channel_art("https://www.youtube.com/@TestChannel")
+
+    assert result is not None
+    assert result["avatar_url"] == "https://img/regular.jpg"
+    assert result["banner_url"] == ""
+
+
 def test_fetch_channel_art_saves_json_in_channel_dir(tmp_path, monkeypatch):
-    """When a matching channel subdirectory exists, channel.json is saved inside it."""
+    """When a channel subdirectory with [channel_id] suffix exists, channel.json is saved inside it."""
+    from app import _fetch_channel_art
+
+    # yt-dlp names dirs like "Studio_Bruxelles [UCxxxxxx]"
+    channel_dir = tmp_path / "Studio_Bruxelles [UCxxxxxx]"
+    channel_dir.mkdir()
+    _make_yt_dlp_mock(
+        monkeypatch,
+        {"channel": "Studio Bruxelles", "channel_id": "UCxxxxxx", "thumbnail": "https://img/av.jpg"},
+    )
+
+    _fetch_channel_art("https://www.youtube.com/@StudioBruxelles", data_path=str(tmp_path))
+
+    saved = channel_dir / "Studio Bruxelles.channel.json"
+    assert saved.exists(), "channel.json should be saved inside the channel dir matched by [channel_id]"
+    assert (tmp_path / "Studio Bruxelles.channel.json").exists() is False, "should not also save at root"
+
+
+def test_fetch_channel_art_saves_json_in_channel_dir_exact_name_fallback(tmp_path, monkeypatch):
+    """When no [channel_id] dir exists, falls back to exact channel_name directory match."""
     from app import _fetch_channel_art
 
     channel_dir = tmp_path / "Studio Bruxelles"
@@ -2089,7 +2160,7 @@ def test_fetch_channel_art_saves_json_in_channel_dir(tmp_path, monkeypatch):
     _fetch_channel_art("https://www.youtube.com/@StudioBruxelles", data_path=str(tmp_path))
 
     saved = channel_dir / "Studio Bruxelles.channel.json"
-    assert saved.exists(), "channel.json should be saved inside the existing channel dir"
+    assert saved.exists(), "channel.json should be saved inside the exact-name channel dir as fallback"
     assert (tmp_path / "Studio Bruxelles.channel.json").exists() is False, "should not also save at root"
 
 

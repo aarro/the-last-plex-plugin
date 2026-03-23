@@ -51,6 +51,8 @@ See [CLAUDE.md](CLAUDE.md) for full documentation.
 ```
 the-last-plex-plugin/
 ├── CLAUDE.md          # Full developer docs
+├── docs/              # Reference documents
+│   └── yt-dlp-json-reference.md  # Annotated examples of .info.json and .channel.json
 ├── provider/          # YAMP HTTP provider (FastAPI + React UI)
 └── legacy/            # Original .bundle agent (reference only)
 ```

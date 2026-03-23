@@ -134,6 +134,9 @@ def build_index(data_path: str) -> tuple[dict[str, str], dict[str, str]]:
 
     for root, _, files in os.walk(data_path, onerror=onerror):
         for f in files:
+            # Only index yt-dlp video metadata files. *.channel.json (channel art
+            # cache written by _fetch_channel_art) and _collection_map.json must
+            # not be treated as video entries.
             if not f.endswith(".info.json"):
                 continue
             # Try the filename first (yt-dlp default: "Title [VIDEO_ID].info.json").
@@ -214,12 +217,23 @@ def _try_index_from_filename(video_id: str, media_path: str) -> bool:
 
 # ── Channel art helpers ───────────────────────────────────────────────────────
 
+_FILENAME_UNSAFE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
-def _fetch_channel_art(uploader_url: str) -> dict | None:
+
+def _sanitize_filename(name: str) -> str:
+    """Replace filesystem-unsafe characters with underscores."""
+    return _FILENAME_UNSAFE_RE.sub("_", name).strip()
+
+
+def _fetch_channel_art(uploader_url: str, data_path: str | None = None) -> dict | None:
     """Fetch channel avatar and banner from YouTube via yt-dlp. Synchronous — call via thread.
 
     Returns {channel, avatar_url, banner_url} or None on failure.
     Only attempts YouTube URLs (uploader_url contains 'youtube.com').
+
+    If data_path is given, saves the raw yt-dlp channel info dict to
+    <channel_name>.channel.json in the channel's subdirectory (if it exists
+    under data_path) or at the data_path root as a fallback.
     """
     if "youtube.com" not in uploader_url:
         return None
@@ -234,8 +248,22 @@ def _fetch_channel_art(uploader_url: str) -> dict | None:
         }
         with _yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[union-attr]
             info = ydl.extract_info(uploader_url, download=False) or {}
+        channel_name = info.get("channel") or info.get("uploader") or ""
+        if data_path and channel_name:
+            safe_name = _sanitize_filename(channel_name)
+            channel_dir = os.path.join(data_path, channel_name)
+            if os.path.isdir(channel_dir):
+                save_path = os.path.join(channel_dir, f"{safe_name}.channel.json")
+            else:
+                save_path = os.path.join(data_path, f"{safe_name}.channel.json")
+            try:
+                with open(save_path, "w", encoding="utf-8") as fh:
+                    json.dump(info, fh, indent=2, ensure_ascii=False)
+                logger.debug("_fetch_channel_art: saved channel JSON to '%s'", save_path)
+            except OSError as e:
+                logger.warning("_fetch_channel_art: could not save channel JSON to '%s': %s", save_path, e)
         return {
-            "channel": info.get("channel") or info.get("uploader") or "",
+            "channel": channel_name,
             "avatar_url": info.get("thumbnail") or "",
             "banner_url": info.get("tvBanner") or info.get("banner") or "",
         }
@@ -318,7 +346,7 @@ async def _prefetch_channel_art_bg(collection_names: list[str]) -> None:
             for url in urls:
                 if url not in _channel_art_cache:
                     try:
-                        result = await asyncio.to_thread(_fetch_channel_art, url)
+                        result = await asyncio.to_thread(_fetch_channel_art, url, DATA_PATH)
                     except Exception:
                         logger.exception(
                             "_prefetch_channel_art_bg: unhandled exception fetching art for '%s' (collection '%s')",

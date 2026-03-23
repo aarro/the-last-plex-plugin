@@ -1962,6 +1962,54 @@ async def test_put_collections_art_field_triggers_artwork_sync(patched_app, monk
     mock_artwork.assert_awaited_once()
 
 
+# ── build_index — *.channel.json and *.info.json separation ──────────────────
+
+
+def test_build_index_ignores_channel_json(tmp_path):
+    """*.channel.json files are not indexed as videos."""
+    from app import build_index
+
+    # A .channel.json file that would collide if incorrectly parsed
+    (tmp_path / "Studio Bruxelles.channel.json").write_text(
+        json.dumps({"id": "should_not_be_indexed", "channel": "Studio Bruxelles"}),
+        encoding="utf-8",
+    )
+    # A legitimate video info file
+    valid_id = "validIDxxxxx"
+    (tmp_path / f"Video [{valid_id}].info.json").write_text(
+        json.dumps({"id": valid_id, "title": "Test"}),
+        encoding="utf-8",
+    )
+
+    index, _ = build_index(str(tmp_path))
+
+    assert valid_id in index, "valid info.json should be indexed"
+    assert "should_not_be_indexed" not in index, "channel.json must not be indexed as a video"
+    assert len(index) == 1
+
+
+def test_build_index_channel_json_in_subdir(tmp_path):
+    """*.channel.json inside a channel subdirectory is also ignored."""
+    from app import build_index
+
+    channel_dir = tmp_path / "alt-J"
+    channel_dir.mkdir()
+    (channel_dir / "alt-J.channel.json").write_text(
+        json.dumps({"id": "fake", "channel": "alt-J"}),
+        encoding="utf-8",
+    )
+    valid_id = "altJvideo1234"
+    (channel_dir / f"Live Set [{valid_id}].info.json").write_text(
+        json.dumps({"id": valid_id, "title": "Live Set"}),
+        encoding="utf-8",
+    )
+
+    index, _ = build_index(str(tmp_path))
+
+    assert valid_id in index
+    assert "fake" not in index
+
+
 # ── _fetch_channel_art ────────────────────────────────────────────────────────
 
 
@@ -1999,6 +2047,94 @@ def test_fetch_channel_art_exception_returns_none(monkeypatch):
     result = _fetch_channel_art("https://www.youtube.com/@TestChannel")
 
     assert result is None
+
+
+def _make_yt_dlp_mock(monkeypatch, info: dict):
+    """Wire up a mock yt-dlp module that returns `info` from extract_info."""
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info.return_value = info
+    mock_module = MagicMock()
+    mock_module.YoutubeDL.return_value = mock_ydl
+    monkeypatch.setattr(yamp_app, "_yt_dlp", mock_module)
+    monkeypatch.setattr(yamp_app, "_YT_DLP_AVAILABLE", True)
+    return mock_ydl
+
+
+def test_fetch_channel_art_saves_json_flat(tmp_path, monkeypatch):
+    """When no channel subdirectory exists, channel.json is saved at the data root."""
+    from app import _fetch_channel_art
+
+    _make_yt_dlp_mock(monkeypatch, {"channel": "Studio Bruxelles", "thumbnail": "https://img/av.jpg"})
+
+    result = _fetch_channel_art("https://www.youtube.com/@StudioBruxelles", data_path=str(tmp_path))
+
+    assert result is not None
+    assert result["channel"] == "Studio Bruxelles"
+    saved = tmp_path / "Studio Bruxelles.channel.json"
+    assert saved.exists(), "channel.json should be written at the data root"
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    assert data["channel"] == "Studio Bruxelles"
+
+
+def test_fetch_channel_art_saves_json_in_channel_dir(tmp_path, monkeypatch):
+    """When a matching channel subdirectory exists, channel.json is saved inside it."""
+    from app import _fetch_channel_art
+
+    channel_dir = tmp_path / "Studio Bruxelles"
+    channel_dir.mkdir()
+    _make_yt_dlp_mock(monkeypatch, {"channel": "Studio Bruxelles", "thumbnail": "https://img/av.jpg"})
+
+    _fetch_channel_art("https://www.youtube.com/@StudioBruxelles", data_path=str(tmp_path))
+
+    saved = channel_dir / "Studio Bruxelles.channel.json"
+    assert saved.exists(), "channel.json should be saved inside the existing channel dir"
+    assert (tmp_path / "Studio Bruxelles.channel.json").exists() is False, "should not also save at root"
+
+
+def test_fetch_channel_art_sanitizes_filename(tmp_path, monkeypatch):
+    """Channel names with unsafe characters are sanitized in the filename."""
+    from app import _fetch_channel_art
+
+    _make_yt_dlp_mock(monkeypatch, {"channel": 'AC/DC: Rock"n"Roll', "thumbnail": ""})
+
+    _fetch_channel_art("https://www.youtube.com/@ACDC", data_path=str(tmp_path))
+
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    assert files[0].name.endswith(".channel.json")
+    assert "/" not in files[0].name
+    assert ":" not in files[0].name
+
+
+def test_fetch_channel_art_save_error_does_not_raise(tmp_path, monkeypatch):
+    """An OSError while saving channel.json is logged but does not affect the return value."""
+    from app import _fetch_channel_art
+
+    _make_yt_dlp_mock(monkeypatch, {"channel": "Test Channel", "thumbnail": "https://img/av.jpg"})
+
+    # Make tmp_path read-only so the write fails
+    tmp_path.chmod(0o555)
+    try:
+        result = _fetch_channel_art("https://www.youtube.com/@TestChannel", data_path=str(tmp_path))
+    finally:
+        tmp_path.chmod(0o755)  # restore so tmp_path cleanup works
+
+    assert result is not None
+    assert result["channel"] == "Test Channel"
+
+
+def test_fetch_channel_art_no_data_path_skips_save(tmp_path, monkeypatch):
+    """When data_path is None, no file is written."""
+    from app import _fetch_channel_art
+
+    _make_yt_dlp_mock(monkeypatch, {"channel": "Test Channel", "thumbnail": "https://img/av.jpg"})
+
+    result = _fetch_channel_art("https://www.youtube.com/@TestChannel", data_path=None)
+
+    assert result is not None
+    assert list(tmp_path.iterdir()) == [], "no file should be written when data_path is None"
 
 
 # ── _prefetch_channel_art_bg — error handling ────────────────────────────────

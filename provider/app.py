@@ -47,7 +47,9 @@ logger = logging.getLogger(__name__)
 
 # Single source of truth for Plex-related exception types caught throughout this module.
 # PlexApiException covers plexapi errors; RequestException covers network/HTTP errors;
-# ET.ParseError covers malformed XML responses from Plex.
+# ET.ParseError covers malformed XML responses from Plex (plexapi does not always
+# wrap these internally). Note: ET.ParseError inherits FROM SyntaxError — catching
+# ET.ParseError does NOT absorb unrelated SyntaxErrors (only the reverse is true).
 _PLEX_ERRS = (PlexApiException, requests.exceptions.RequestException, ET.ParseError)
 
 # ── Config ───────────────────────────────────────────────────────────────────
@@ -72,6 +74,33 @@ _stem_index: dict[str, str] = {}  # info.json filename stem → video_id (match 
 _video_meta_cache: dict[str, dict] = {}  # video_id → MATCH_FIELDS subset of info_json
 _last_rebuild: float = 0.0
 _REBUILD_COOLDOWN = 60.0
+
+# Channel art cache: uploader_url → {channel, avatar_url, banner_url}
+# Populated at startup and after collection saves; keyed by the YouTube channel URL.
+# A URL mapped to _FETCH_ERROR_SENTINEL means a fetch was attempted but failed;
+# this prevents repeated retries and lets the API report a distinguishable error state.
+
+
+class _FetchErrorSentinel:
+    """Immutable singleton: a channel art fetch was attempted for this URL and failed.
+
+    Using a dedicated class (rather than a mutable dict) makes the identity check
+    `entry is _FETCH_ERROR_SENTINEL` unambiguous and prevents accidental mutation.
+    """
+
+    __slots__ = ()
+
+
+_FETCH_ERROR_SENTINEL = _FetchErrorSentinel()
+_channel_art_cache: dict[str, dict | _FetchErrorSentinel] = {}
+# Tracks which collection names are currently being prefetched to prevent duplicate runs.
+_prefetch_in_progress: set[str] = set()
+
+
+def _log_task_exception(task: asyncio.Task, label: str) -> None:
+    """Done-callback: log an error if the task raised an unhandled exception."""
+    if not task.cancelled() and (exc := task.exception()):
+        logger.error("%s raised an unhandled exception: %s", label, exc, exc_info=exc)
 
 
 # Sanity-check IDs read directly from info.json (build_index fallback for no-bracket filenames)
@@ -173,6 +202,134 @@ def _try_index_from_filename(video_id: str, media_path: str) -> bool:
     return False
 
 
+# ── Channel art helpers ───────────────────────────────────────────────────────
+
+
+def _fetch_channel_art(uploader_url: str) -> dict | None:
+    """Fetch channel avatar and banner from YouTube via yt-dlp. Synchronous — call via thread.
+
+    Returns {channel, avatar_url, banner_url} or None on failure.
+    Only attempts YouTube URLs (uploader_url contains 'youtube.com').
+    """
+    if "youtube.com" not in uploader_url:
+        return None
+    try:
+        import yt_dlp
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(uploader_url, download=False) or {}
+        return {
+            "channel": info.get("channel") or info.get("uploader") or "",
+            "avatar_url": info.get("thumbnail") or "",
+            "banner_url": info.get("tvBanner") or info.get("banner") or "",
+        }
+    except ImportError:
+        logger.error("_fetch_channel_art: yt-dlp is not installed — cannot fetch channel art")
+        return None
+    except Exception:
+        logger.exception("_fetch_channel_art: unexpected error for '%s'", uploader_url)
+        return None
+
+
+def _get_channel_urls_for_collection(collection_name: str) -> list[str]:
+    """Return deduplicated YouTube uploader_urls for all matched videos in a collection."""
+    mapping_path = _collection_map_path()
+    if not mapping_path:
+        logger.debug("_get_channel_urls_for_collection: no collection map found for '%s'", collection_name)
+        return []
+    try:
+        data = load_map(mapping_path)
+    except (OSError, ValueError) as e:
+        logger.error("_get_channel_urls_for_collection: failed to load collection map at '%s': %s", mapping_path, e)
+        return []
+
+    col = next((c for c in data.get("collections", []) if c.get("name") == collection_name), None)
+    if not col:
+        return []
+
+    matched_ids = data.get("matched_ids", [])
+    # Filter to IDs actually in this collection using the in-memory meta cache for the
+    # match check (no disk I/O). Only read info.json from disk for matched videos, and
+    # only to extract uploader_url which is not stored in the meta cache.
+    col_spec = [{"name": col["name"], "rules": col.get("rules", [])}]
+    seen: set[str] = set()
+    urls: list[str] = []
+    for video_id in matched_ids:
+        cached = _video_meta_cache.get(video_id)
+        if cached is None:
+            continue
+        try:
+            matched, _ = match_video(cached, col_spec)
+        except Exception:
+            logger.warning("_get_channel_urls_for_collection: match_video raised for '%s' — skipping", video_id)
+            continue
+        if not matched:
+            continue
+        # Disk read only for matched videos, solely to get uploader_url.
+        info_path = _video_index.get(video_id)
+        if not info_path:
+            continue
+        try:
+            with open(info_path, encoding="utf-8") as f:
+                info = json.load(f)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning("_get_channel_urls_for_collection: skipping '%s' at '%s': %s", video_id, info_path, e)
+            continue
+        url = info.get("uploader_url", "")
+        if url and "youtube.com" in url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+async def _prefetch_channel_art_bg(collection_names: list[str]) -> None:
+    """Background task: fetch and cache channel art for the given collections.
+
+    Deduplicates against _prefetch_in_progress so concurrent calls for the same
+    collection name don't trigger redundant yt-dlp network fetches.
+    """
+    names_to_run = [n for n in collection_names if n not in _prefetch_in_progress]
+    if not names_to_run:
+        return
+    _prefetch_in_progress.update(names_to_run)
+    try:
+        for name in names_to_run:
+            try:
+                urls = await asyncio.to_thread(_get_channel_urls_for_collection, name)
+            except Exception:
+                logger.exception(
+                    "_prefetch_channel_art_bg: failed to get channel URLs for collection '%s' — skipping",
+                    name,
+                )
+                continue
+            for url in urls:
+                if url not in _channel_art_cache:
+                    try:
+                        result = await asyncio.to_thread(_fetch_channel_art, url)
+                    except Exception:
+                        logger.exception(
+                            "_prefetch_channel_art_bg: unhandled exception fetching art for '%s' (collection '%s')",
+                            url,
+                            name,
+                        )
+                        _channel_art_cache[url] = _FETCH_ERROR_SENTINEL
+                        continue
+                    if result:
+                        _channel_art_cache[url] = result
+                        logger.info("_prefetch_channel_art_bg: cached art for '%s'", url)
+                    else:
+                        # fetch returned None (e.g. yt-dlp not installed or import failed)
+                        _channel_art_cache[url] = _FETCH_ERROR_SENTINEL
+    finally:
+        _prefetch_in_progress.difference_update(names_to_run)
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 
@@ -187,6 +344,22 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"YOUTUBE_DATA_PATH '{DATA_PATH}' is not a directory")
     _video_index, _stem_index = build_index(DATA_PATH)
     _video_meta_cache = build_meta_cache(_video_index)
+
+    # Pre-fetch channel art for all collections with matched videos in the background.
+    mapping_path = _collection_map_path()
+    if mapping_path:
+        col_map: dict = {}
+        try:
+            col_map = load_map(mapping_path)
+        except OSError as e:
+            logger.error("lifespan: could not read collection map for channel art prefetch: %s", e)
+        except ValueError as e:
+            logger.error("lifespan: collection map is corrupt — channel art prefetch skipped: %s", e)
+        names = [c.get("name") for c in col_map.get("collections", []) if c.get("name")]
+        if names:
+            task = asyncio.ensure_future(_prefetch_channel_art_bg(names))
+            task.add_done_callback(lambda f: _log_task_exception(f, "lifespan channel art prefetch"))
+
     yield
 
 
@@ -312,12 +485,14 @@ async def match(request: Request):
 
     title = info_json.get("title")
     if not title:
-        logger.error("Missing title in info_json for video ID: %s (file corrupt?)", video_id)
+        # Return empty match (not 4xx/5xx) so Plex skips this file gracefully rather than
+        # retrying. Corrupt or incomplete info.json should not block the rest of the library.
+        logger.warning("Missing title in info_json for video ID: %s (file corrupt?)", video_id)
         return JSONResponse(_media_container([]))
 
     upload_date_raw = info_json.get("upload_date")
     if not upload_date_raw:
-        logger.error("Missing upload_date in info_json for video ID: %s (file corrupt?)", video_id)
+        logger.warning("Missing upload_date in info_json for video ID: %s (file corrupt?)", video_id)
         return JSONResponse(_media_container([]))
 
     try:
@@ -476,10 +651,30 @@ class RuleModel(BaseModel):
     values: list[str]
 
 
+# Plex supports four artwork slots for collections. Recommended sizes:
+#   image (Poster)     — uploadPoster      — 2:3 portrait,    e.g. 680×1000 px
+#   art   (Background) — uploadArt         — 16:9 landscape,  e.g. 1920×1080 px
+#   logo  (Logo)       — uploadLogo        — PNG w/ transparency, dimensions vary
+#   square_art         — uploadSquareArt   — 1:1 square,      dimensions not documented
+#
+# YouTube thumbnails (info_json["thumbnail"]) are 16:9 at up to 1920×1080 — ideal for `art`.
+# Nothing in yt-dlp output is suitable for `logo` or `square_art`.
+_COLLECTION_IMAGE_FIELDS = ("image", "art", "logo", "square_art")
+_COLLECTION_IMAGE_UPLOAD_METHODS = {
+    "image": "uploadPoster",
+    "art": "uploadArt",
+    "logo": "uploadLogo",
+    "square_art": "uploadSquareArt",
+}
+
+
 class CollectionModel(BaseModel):
     name: str
     rules: list[RuleModel]
     image: str | None = None
+    art: str | None = None
+    logo: str | None = None
+    square_art: str | None = None
 
 
 class CollectionsBody(BaseModel):
@@ -512,16 +707,21 @@ async def api_get_collections():
         }
     try:
         data = load_map(mapping_path)
-    except (OSError, ValueError) as e:
-        logger.error("api_get_collections: failed to load collection map at '%s': %s", mapping_path, e)
-        raise HTTPException(status_code=500, detail="Could not read collection map") from e
+    except OSError as e:
+        logger.error("api_get_collections: could not read collection map at '%s': %s", mapping_path, e)
+        raise HTTPException(status_code=500, detail="Collection map could not be read — check file permissions") from e
+    except ValueError as e:
+        logger.error("api_get_collections: invalid collection map at '%s': %s", mapping_path, e)
+        raise HTTPException(status_code=500, detail="Collection map is invalid — check _collection_map.json") from e
 
     plex_thumbs: dict[str, str] = {}
     plex_thumb_error = False
     if PLEX_URL and PLEX_TOKEN:
         try:
             plex_thumbs = await asyncio.to_thread(_fetch_plex_collection_thumbs)
-        except _PLEX_ERRS:
+        except Exception:
+            # _fetch_plex_collection_thumbs is fault-tolerant and normally returns {}
+            # on any Plex error. This outer catch is a safety net for truly unexpected failures.
             logger.exception("api_get_collections: unexpected error fetching Plex thumbs")
             plex_thumb_error = True
 
@@ -544,9 +744,12 @@ async def api_put_collections(body: CollectionsBody, background_tasks: Backgroun
         raise HTTPException(status_code=404, detail="Collection map not found")
     try:
         data = load_map(mapping_path)
-    except (OSError, ValueError) as e:
-        logger.error("api_put_collections: failed to load collection map at '%s': %s", mapping_path, e)
-        raise HTTPException(status_code=500, detail="Could not read collection map") from e
+    except OSError as e:
+        logger.error("api_put_collections: could not read collection map at '%s': %s", mapping_path, e)
+        raise HTTPException(status_code=500, detail="Collection map could not be read — check file permissions") from e
+    except ValueError as e:
+        logger.error("api_put_collections: invalid collection map at '%s': %s", mapping_path, e)
+        raise HTTPException(status_code=500, detail="Collection map is invalid — check _collection_map.json") from e
 
     old_cols = data.get("collections", [])
     new_cols = [c.model_dump() for c in body.collections]
@@ -589,13 +792,56 @@ async def api_put_collections(body: CollectionsBody, background_tasks: Backgroun
         if has_rule_changes:
             background_tasks.add_task(_do_rescan_bg)
             plex_tasks_queued = True
-        old_images = {c["name"]: c.get("image") for c in old_cols}
+        old_images = {c["name"]: {f: c.get(f) for f in _COLLECTION_IMAGE_FIELDS} for c in old_cols}
         for col in body.collections:
-            if col.image and (col.name in rules_changed or old_images.get(col.name) != col.image):
+            has_any_image = any(getattr(col, f) for f in _COLLECTION_IMAGE_FIELDS)
+            old = old_images.get(col.name, {})
+            image_changed = any(getattr(col, f) != old.get(f) for f in _COLLECTION_IMAGE_FIELDS)
+            if has_any_image and (col.name in rules_changed or image_changed):
                 background_tasks.add_task(_sync_collection_artwork_bg, col)
                 plex_tasks_queued = True
 
+    # Queue channel art prefetch for collections whose rules changed (new matched videos likely).
+    # Uses ensure_future (not background_tasks) so exceptions are caught by _log_task_exception
+    # with structured YAMP logging rather than surfacing through Starlette's default handler.
+    if rules_changed:
+        task = asyncio.ensure_future(_prefetch_channel_art_bg(list(rules_changed)))
+        task.add_done_callback(lambda f: _log_task_exception(f, "channel art prefetch after collection save"))
+
     return {"ok": True, **stats, "plex_sync": plex_tasks_queued}
+
+
+@app.get("/api/channel-art")
+async def api_channel_art(collection: str):
+    """Return cached channel avatar/banner options for a collection.
+
+    If results are not yet cached, triggers a background fetch and returns
+    {options: [], pending: true} so the UI can show a loading state.
+    """
+    try:
+        urls = await asyncio.to_thread(_get_channel_urls_for_collection, collection)
+    except Exception:
+        logger.exception("api_channel_art: unexpected error getting channel URLs for '%s'", collection)
+        raise HTTPException(status_code=500, detail=f"Channel URL lookup failed for '{collection}'") from None
+    options = []
+    missing = []
+    fetch_error = False
+    for url in urls:
+        if url in _channel_art_cache:
+            entry = _channel_art_cache[url]
+            if entry is _FETCH_ERROR_SENTINEL:
+                fetch_error = True
+            else:
+                options.append({**entry, "uploader_url": url})
+        else:
+            missing.append(url)
+    if missing:
+        task = asyncio.ensure_future(_prefetch_channel_art_bg([collection]))
+        task.add_done_callback(lambda f: _log_task_exception(f, f"channel art prefetch for '{collection}'"))
+    result: dict = {"options": options, "pending": len(missing) > 0}
+    if fetch_error:
+        result["fetch_error"] = True
+    return result
 
 
 def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> tuple[list[dict], list[str]]:
@@ -610,7 +856,7 @@ def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> t
         try:
             with open(path, encoding="utf-8") as f:
                 info_json = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("api_videos: skipping %s: %s", video_id, e)
             skipped_ids.append(video_id)
             continue
@@ -748,7 +994,7 @@ def _find_matching_plex_items(section, col_spec: list) -> list:
         try:
             with open(info_path, encoding="utf-8") as f:
                 info_json = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("_find_matching_plex_items: skipping '%s' at '%s': %s", video_id, info_path, e)
             continue
         matches, _ = match_video(info_json, col_spec)
@@ -793,11 +1039,12 @@ def _fetch_plex_collection_thumbs() -> dict[str, str]:
 
 
 def _sync_collection_artwork(col: CollectionModel) -> dict:
-    """Ensure `col` exists in Plex and upload its poster. Synchronous — call via asyncio.to_thread."""
+    """Ensure `col` exists in Plex and upload its artwork. Synchronous — call via asyncio.to_thread."""
     from plexapi.exceptions import NotFound
     from plexapi.server import PlexServer
 
-    if not col.image:
+    images_to_upload = [(f, _COLLECTION_IMAGE_UPLOAD_METHODS[f]) for f in _COLLECTION_IMAGE_FIELDS if getattr(col, f)]
+    if not images_to_upload:
         return {"ok": False, "created": False, "error": "no image set"}
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
@@ -814,39 +1061,59 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
     if not yamp_sections:
         return {"ok": False, "created": False, "error": "No YAMP-managed sections found in Plex"}
 
+    last_section_error: dict | None = None
     for section in yamp_sections:
         created = False
         try:
             plex_col = section.collection(col.name)
         except NotFound:
-            items = _find_matching_plex_items(section, col_spec)
+            try:
+                items = _find_matching_plex_items(section, col_spec)
+            except _PLEX_ERRS as e:
+                logger.error("_sync_collection_artwork: listing items for '%s' failed: %s", col.name, e)
+                last_section_error = {"ok": False, "created": False, "error": f"Could not list items: {e}"}
+                continue
             if not items:
-                return {
+                # Collection not in this section — try the next one.
+                last_section_error = {
                     "ok": False,
                     "created": False,
                     "not_found_in_plex": True,
                     "error": f"'{col.name}' not in Plex and no matched videos found",
                 }
+                continue
             try:
                 plex_col = plex.createCollection(title=col.name, section=section, items=items)
                 created = True
             except _PLEX_ERRS as e:
                 logger.error("_sync_collection_artwork: createCollection failed for '%s': %s", col.name, e)
-                return {"ok": False, "created": False, "error": f"Could not create collection: {e}"}
+                last_section_error = {"ok": False, "created": False, "error": f"Could not create collection: {e}"}
+                continue
         except _PLEX_ERRS as e:
             logger.error("_sync_collection_artwork: collection lookup failed for '%s': %s", col.name, e)
-            return {"ok": False, "created": False, "error": f"Collection lookup failed: {e}"}
+            last_section_error = {"ok": False, "created": False, "error": f"Collection lookup failed: {e}"}
+            continue
 
-        try:
-            plex_col.uploadPoster(url=col.image)
-        except _PLEX_ERRS as e:
-            logger.error("_sync_collection_artwork: uploadPoster failed for '%s': %s", col.name, e)
-            return {"ok": False, "created": created, "error": f"Poster upload failed: {e}"}
+        errors: dict[str, str] = {}
+        for field, method in images_to_upload:
+            url = getattr(col, field)
+            try:
+                getattr(plex_col, method)(url=url)
+            except _PLEX_ERRS as e:
+                logger.error("_sync_collection_artwork: %s failed for '%s': %s", method, col.name, e)
+                errors[field] = f"{method} failed: {e}"
 
-        logger.info("_sync_collection_artwork: '%s' — ok (created=%s)", col.name, created)
-        return {"ok": True, "created": created, "error": None}
+        if not errors:
+            logger.info("_sync_collection_artwork: '%s' — ok (created=%s)", col.name, created)
+            return {"ok": True, "created": created, "error": None}
+        # Partial or full upload failure — the collection was already found/created in this
+        # section, so trying subsequent sections would be wrong. Return immediately.
+        return {"ok": False, "created": created, "error": errors}
 
-    raise RuntimeError("_sync_collection_artwork: unexpectedly fell through section loop")
+    # Collection not found or listing failed in every YAMP section.
+    # last_section_error is always set here: the loop ran at least once (yamp_sections
+    # is guaranteed non-empty above) and every continue path sets it.
+    return last_section_error  # type: ignore[return-value]
 
 
 _PLEX_THUMB_PATH_RE = re.compile(r"^/library/(collections|metadata)/\d+/(thumb|composite)(/\d+(\?[a-zA-Z0-9=&]+)?)?$")
@@ -930,7 +1197,7 @@ async def _do_rescan_bg() -> None:
         if result.get("failed_sections"):
             logger.error("Background rescan: failed sections: %s", result["failed_sections"])
     except HTTPException as e:
-        logger.error("Background rescan: Plex error (HTTP %d): %s", e.status_code, e.detail)
+        logger.error("Background rescan: Plex returned HTTP %d — %s", e.status_code, e.detail)
     except Exception:
         logger.exception("Background rescan raised an unhandled exception")
 
@@ -943,10 +1210,27 @@ async def api_rescan():
     return await _do_rescan()
 
 
-# Artwork retry delay in seconds. Long enough for Plex to finish scanning a typical
-# library after a refresh request. Increase if artwork sync still fails on very large
-# libraries.
+# Artwork retry delay in seconds. The retry fires only when the collection is not yet
+# visible in Plex after a rescan (not_found_in_plex) — upload failures are not retried.
+# Increase if artwork sync still fails on very large libraries where the rescan takes
+# longer than this.
 _ARTWORK_RETRY_DELAY = 30
+
+
+def _format_sync_error(col: "CollectionModel", error) -> str:
+    """Format _sync_collection_artwork's 'error' field for human-readable log output.
+
+    When error is a dict (per-field upload failures), includes which fields succeeded
+    alongside which failed so operators can distinguish partial from total failures.
+    """
+    if not isinstance(error, dict):
+        return str(error) if error is not None else "unknown error"
+    all_fields = [f for f in _COLLECTION_IMAGE_FIELDS if getattr(col, f)]
+    succeeded = [f for f in all_fields if f not in error]
+    detail = "; ".join(f"{f}: {msg}" for f, msg in error.items())
+    if succeeded:
+        return f"partial failure (succeeded: {succeeded}) — {detail}"
+    return detail
 
 
 async def _sync_collection_artwork_bg(col) -> None:
@@ -960,7 +1244,7 @@ async def _sync_collection_artwork_bg(col) -> None:
         result = await asyncio.to_thread(_sync_collection_artwork, col)
         if not result.get("ok"):
             if result.get("not_found_in_plex"):
-                logger.info(
+                logger.warning(
                     "Artwork sync for '%s' deferred — Plex rescan may still be in progress. Retrying in %ds.",
                     col.name,
                     _ARTWORK_RETRY_DELAY,
@@ -975,11 +1259,13 @@ async def _sync_collection_artwork_bg(col) -> None:
                             col.name,
                         )
                     else:
-                        logger.error("Artwork sync retry failed for '%s': %s", col.name, result.get("error"))
+                        err = _format_sync_error(col, result.get("error"))
+                        logger.error("Artwork sync retry failed for '%s': %s", col.name, err)
                 else:
                     logger.info("Artwork sync for '%s' succeeded after retry.", col.name)
             else:
-                logger.error("Background artwork sync failed for '%s': %s", col.name, result.get("error"))
+                err = _format_sync_error(col, result.get("error"))
+                logger.error("Background artwork sync failed for '%s': %s", col.name, err)
     except asyncio.CancelledError:
         logger.warning("Background artwork sync for '%s' was cancelled (server shutting down?)", col.name)
         raise

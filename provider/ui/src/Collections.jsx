@@ -3,15 +3,22 @@ import { useEffect, useRef, useState } from "react";
 const FIELDS = ["tags", "title", "channel", "uploader", "categories", "description", "extractor"];
 const MATCHES = ["exact", "in"];
 
-function emptyRule() {
-  return { field: "tags", values: [], match: "exact" };
-}
+const IMAGE_TYPES = [
+  { key: "image", label: "Poster", hint: "2:3 portrait (e.g. 680×1000)" },
+  { key: "art", label: "Background", hint: "16:9 landscape (e.g. 1920×1080)" },
+  { key: "logo", label: "Logo", hint: "PNG with transparency recommended" },
+  { key: "square_art", label: "Square Art", hint: "1:1 square" },
+];
 
 /** Prevents click/key events from bubbling to the parent card toggle. */
 const stopBubble = {
   onClick: (e) => e.stopPropagation(),
   onKeyDown: (e) => e.stopPropagation(),
 };
+
+function emptyRule() {
+  return { field: "tags", values: [], match: "exact" };
+}
 
 function RuleForm({ rule, onChange, onRemove }) {
   const [rawValues, setRawValues] = useState(rule.values.join(", "));
@@ -107,6 +114,173 @@ function isAbsoluteUrl(url) {
   return typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"));
 }
 
+/** A small thumbnail chip for one image type with a "Set" button below. */
+function ImageChip({ imageType, url, onLightbox, onSet, hasSuggestions }) {
+  const { key, label } = imageType;
+  const setLabel = key === "square_art" && hasSuggestions ? "Set ✨" : "Set";
+
+  return (
+    <div className="image-chip" data-type={key}>
+      {/* biome-ignore lint/a11y/useSemanticElements: dual-mode button (lightbox vs set) */}
+      <div
+        className="image-chip-thumb"
+        role="button"
+        tabIndex={0}
+        title={url ? `View ${label}` : `Set ${label}`}
+        onClick={() => (url ? onLightbox(url) : onSet())}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") url ? onLightbox(url) : onSet();
+        }}
+      >
+        {url ? <img src={url} alt={label} /> : <span className="image-chip-label">{label}</span>}
+      </div>
+      <button type="button" className="btn-ghost btn-sm" onClick={onSet}>
+        {setLabel}
+      </button>
+    </div>
+  );
+}
+
+/** Lightbox overlay — click or Escape to dismiss. */
+function Lightbox({ src, onClose }) {
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: lightbox backdrop intentionally uses div with role
+    <div
+      className="lightbox-overlay"
+      role="button"
+      tabIndex={0}
+      aria-label="Close"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") onClose();
+      }}
+    >
+      <img className="lightbox-img" src={src} alt="" />
+    </div>
+  );
+}
+
+/** Modal for entering a URL for one image type. Square Art shows channel art suggestions. */
+function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
+  const { key, label, hint } = imageType;
+  const [draft, setDraft] = useState(currentUrl || "");
+  const [options, setOptions] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const inputRef = useRef(null);
+
+  // For Square Art, fetch suggestions when the modal opens
+  useEffect(() => {
+    if (key !== "square_art" || !collectionName) return;
+    setLoading(true);
+    fetch(`/api/channel-art?collection=${encodeURIComponent(collectionName)}`)
+      .then((r) => r.json())
+      .then((d) => setOptions(d.options ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [key, collectionName]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const commit = () => {
+    onSet(isAbsoluteUrl(draft) ? draft : null);
+    onClose();
+  };
+
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: modal backdrop uses div with role
+    <div
+      className="url-modal-overlay"
+      role="button"
+      tabIndex={-1}
+      aria-label="Close"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: stopPropagation on modal body */}
+      <div className="url-modal" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+        <div className="url-modal-header">
+          <strong>Set {label}</strong>
+          <span className="url-modal-hint">{hint}</span>
+        </div>
+
+        {key === "square_art" && (
+          <div className="suggestion-section">
+            {loading && <p className="empty">Loading channel art…</p>}
+            {!loading && options.length > 0 && (
+              <>
+                <p className="suggestion-label">Channel avatars from matched videos:</p>
+                <div className="suggestion-chips">
+                  {options.map((opt) => (
+                    <button
+                      key={opt.uploader_url}
+                      type="button"
+                      className="suggestion-chip"
+                      title={opt.channel}
+                      onClick={() => setDraft(opt.avatar_url)}
+                    >
+                      {opt.avatar_url && <img src={opt.avatar_url} alt={opt.channel} />}
+                      <span>{opt.channel}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+            {!loading && options.length === 0 && (
+              <p className="empty">No channel art found yet — enter a URL manually.</p>
+            )}
+          </div>
+        )}
+
+        <input
+          ref={inputRef}
+          type="text"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+          }}
+          placeholder="https://…"
+          className="url-modal-input"
+        />
+        {draft && isAbsoluteUrl(draft) && <img src={draft} alt="" className="url-modal-preview" />}
+        <div className="url-modal-actions">
+          <button type="button" className="btn-primary btn-sm" onClick={commit}>
+            Set
+          </button>
+          <button type="button" className="btn-ghost btn-sm" onClick={onClose}>
+            Cancel
+          </button>
+          {draft && (
+            <button type="button" className="btn-ghost btn-sm" onClick={() => setDraft("")}>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CollectionCard({
   collection,
   videos,
@@ -116,25 +290,32 @@ function CollectionCard({
   plexThumb,
   onVideoSearch,
   initialExpanded,
-  onImageSave,
+  onSave,
 }) {
   const [expanded, setExpanded] = useState(!!initialExpanded);
   const [editName, setEditName] = useState(collection.name);
   const [nameError, setNameError] = useState(null);
-  const [imageEditing, setImageEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [lightboxSrc, setLightboxSrc] = useState(null);
+  const [urlModalKey, setUrlModalKey] = useState(null);
+  const [channelArtOptions, setChannelArtOptions] = useState([]);
 
-  const savedImage = isAbsoluteUrl(collection.image) ? collection.image : null;
-  const [editImageUrl, setEditImageUrl] = useState(savedImage || "");
-  const posterSrc = savedImage || plexThumb;
+  const hasMatchedVideos = videos.some((v) => v.collections.includes(collection.name));
+
+  // Pre-fetch Square Art suggestions when card is expanded and has matched videos.
+  // Uses hasMatchedVideos (a stable bool) instead of the videos array reference to
+  // avoid re-firing on every parent render.
+  useEffect(() => {
+    if (!expanded || !hasMatchedVideos) return;
+    fetch(`/api/channel-art?collection=${encodeURIComponent(collection.name)}`)
+      .then((r) => r.json())
+      .then((d) => setChannelArtOptions(d.options ?? []))
+      .catch(() => {});
+  }, [expanded, collection.name, hasMatchedVideos]);
 
   useEffect(() => {
     setEditName(collection.name);
   }, [collection.name]);
-
-  useEffect(() => {
-    setEditImageUrl(isAbsoluteUrl(collection.image) ? collection.image : "");
-  }, [collection.image]);
 
   const matched = videos.filter((v) => v.collections.includes(collection.name));
 
@@ -166,73 +347,65 @@ function CollectionCard({
     onChange({ ...collection, name: trimmed });
   };
 
-  const saveImage = async () => {
-    const url = editImageUrl.trim();
-    const updated = { ...collection, image: isAbsoluteUrl(url) ? url : null };
-    if (onImageSave) {
-      const ok = await onImageSave(updated);
-      if (ok) setImageEditing(false);
-      // on failure: error shown in action bar; editor stays open
-    } else {
-      onChange(updated);
-      setImageEditing(false);
-    }
-  };
-
-  const clearImage = async () => {
-    setEditImageUrl("");
-    const updated = { ...collection, image: null };
-    if (onImageSave) {
-      const ok = await onImageSave(updated);
-      if (ok) setImageEditing(false);
-    } else {
-      onChange(updated);
-      setImageEditing(false);
-    }
-  };
-
   const toggleExpanded = () => {
     if (expanded) {
-      setImageEditing(false);
       setConfirmDelete(false);
+      setLightboxSrc(null);
+      setUrlModalKey(null);
     }
     setExpanded((v) => !v);
   };
 
-  const handlePosterClick = (e) => {
-    e.stopPropagation();
-    if (expanded) {
-      setImageEditing((v) => !v);
-    } else {
-      toggleExpanded();
-    }
+  const posterSrc = (isAbsoluteUrl(collection.image) ? collection.image : null) || plexThumb;
+
+  const openUrlModal = (key) => {
+    setUrlModalKey(key);
   };
 
-  const handlePosterKey = (e) => {
-    if (e.key === "Enter" || e.key === " ") handlePosterClick(e);
+  const closeUrlModal = () => setUrlModalKey(null);
+
+  const setImageUrl = (key, url) => {
+    onChange({ ...collection, [key]: url });
   };
+
+  const activeImageType = IMAGE_TYPES.find((t) => t.key === urlModalKey);
 
   return (
     <div className={`card${expanded ? " card--expanded" : ""}`} data-collection-name={collection.name}>
-      {/* Left column: poster/thumbnail — toggles expand when collapsed, image editor when expanded */}
-      {/* biome-ignore lint/a11y/useSemanticElements: poster is interactive in two different modes depending on expanded state */}
+      {/* Left column: poster — click expands when collapsed, lightboxes when expanded */}
+      {/* biome-ignore lint/a11y/useSemanticElements: dual-mode button */}
       <div
         className="card-poster-col"
         role="button"
         tabIndex={0}
-        onClick={handlePosterClick}
-        onKeyDown={handlePosterKey}
-        aria-label={expanded ? "Change collection image" : `Expand ${collection.name}`}
-        title={expanded ? "Change collection image" : `Expand ${collection.name}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (expanded) {
+            if (posterSrc) setLightboxSrc(posterSrc);
+          } else {
+            toggleExpanded();
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.stopPropagation();
+            if (expanded) {
+              if (posterSrc) setLightboxSrc(posterSrc);
+            } else {
+              toggleExpanded();
+            }
+          }
+        }}
+        aria-label={expanded ? (posterSrc ? "View poster" : "Poster") : `Expand ${collection.name}`}
+        title={expanded ? (posterSrc ? "View poster" : "Poster") : `Expand ${collection.name}`}
       >
         <div className="card-poster-inner">
           {posterSrc ? <img src={posterSrc} alt="" className="card-poster-img" /> : <div className="card-poster-ph" />}
-          {expanded && <div className="card-poster-overlay">Change Image</div>}
         </div>
       </div>
 
-      {/* Right column row 1: header — always visible, toggles expand */}
-      {/* biome-ignore lint/a11y/useSemanticElements: contains nested interactive content in body */}
+      {/* Right column row 1: header */}
+      {/* biome-ignore lint/a11y/useSemanticElements: contains nested interactive content */}
       <div
         className="card-header-right"
         role="button"
@@ -249,33 +422,10 @@ function CollectionCard({
         </span>
       </div>
 
-      {/* Right column row 2: body — only when expanded */}
+      {/* Right column row 2: body — always visible when expanded */}
       {expanded && (
         <>
-          {/* Right col row 2: name + thumbs alongside image */}
           <div className="card-body-top" {...stopBubble}>
-            {/* Image URL editor — shown when poster is clicked */}
-            {imageEditing && (
-              <div className="image-edit-row">
-                <input
-                  type="text"
-                  value={editImageUrl}
-                  onChange={(e) => setEditImageUrl(e.target.value)}
-                  placeholder="https://…"
-                  className="image-edit-input"
-                />
-                {(editImageUrl || plexThumb) && (
-                  <img src={editImageUrl || plexThumb} alt="" className="image-edit-preview" />
-                )}
-                <button type="button" className="btn-primary btn-sm" onClick={saveImage}>
-                  Save
-                </button>
-                <button type="button" className="btn-ghost btn-sm" onClick={clearImage}>
-                  Clear
-                </button>
-              </div>
-            )}
-
             {/* Name editing */}
             <div className="form-group">
               <label>
@@ -296,11 +446,22 @@ function CollectionCard({
               {nameError && <span className="field-error">{nameError}</span>}
             </div>
 
-            {/* Matched video thumbnails */}
-            <ThumbGrid videos={matched} onVideoSearch={onVideoSearch} />
+            {/* Image type chips */}
+            <div className="image-chips-row">
+              {IMAGE_TYPES.map((imageType) => (
+                <ImageChip
+                  key={imageType.key}
+                  imageType={imageType}
+                  url={isAbsoluteUrl(collection[imageType.key]) ? collection[imageType.key] : null}
+                  onLightbox={setLightboxSrc}
+                  onSet={() => openUrlModal(imageType.key)}
+                  hasSuggestions={imageType.key === "square_art" && channelArtOptions.length > 0}
+                />
+              ))}
+            </div>
           </div>
 
-          {/* Full-width row 3: rules + actions */}
+          {/* Full-width row 3: rules + video thumbs + footer */}
           <div className="card-body-bottom" {...stopBubble}>
             {collection.rules.length === 0 && <p className="empty">No rules — add one below.</p>}
             <div className="rules">
@@ -312,8 +473,13 @@ function CollectionCard({
               + Add Rule
             </button>
 
-            {/* Delete with two-step confirmation */}
-            <div className="card-delete-row">
+            {/* Matched video thumbnails */}
+            <div className="card-thumb-section">
+              <ThumbGrid videos={matched} onVideoSearch={onVideoSearch} />
+            </div>
+
+            {/* Footer: delete + save */}
+            <div className="card-footer-row">
               {confirmDelete ? (
                 <>
                   <button type="button" className="btn-danger btn-sm" onClick={onDelete}>
@@ -328,9 +494,28 @@ function CollectionCard({
                   ✕ Delete collection
                 </button>
               )}
+              {onSave && (
+                <button type="button" className="btn-primary btn-sm" onClick={() => onSave(collection)}>
+                  Save
+                </button>
+              )}
             </div>
           </div>
         </>
+      )}
+
+      {/* Lightbox */}
+      {lightboxSrc && <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
+
+      {/* URL modal */}
+      {urlModalKey && activeImageType && (
+        <UrlModal
+          imageType={activeImageType}
+          collectionName={collection.name}
+          currentUrl={isAbsoluteUrl(collection[urlModalKey]) ? collection[urlModalKey] : ""}
+          onSet={(url) => setImageUrl(urlModalKey, url)}
+          onClose={closeUrlModal}
+        />
       )}
     </div>
   );
@@ -380,7 +565,7 @@ function AddCollectionForm({ onAdd, onCancel, existingNames }) {
   );
 }
 
-export default function Collections({ collections, videos, onChange, onVideoSearch, onImageSave }) {
+export default function Collections({ collections, videos, onChange, onVideoSearch, onSave }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState(null);
   const sectionRef = useRef(null);
@@ -414,8 +599,8 @@ export default function Collections({ collections, videos, onChange, onVideoSear
       <p className="collections-intro">
         Collections group videos from multiple channels, tags, or titles under one name in Plex — great when an artist,
         show, or topic spans different uploaders or video names. Add rules to define what matches; any video satisfying
-        at least one rule joins the collection. Hit <strong>Save Changes</strong> to apply rules and push artwork to
-        Plex.
+        at least one rule joins the collection. Hit <strong>Save</strong> on a collection card to apply rules and push
+        artwork to Plex.
       </p>
 
       {collections.length === 0 && !adding && <p className="empty">No collections yet. Add one to get started.</p>}
@@ -431,12 +616,12 @@ export default function Collections({ collections, videos, onChange, onVideoSear
           plexThumb={c.plex_thumb}
           onVideoSearch={onVideoSearch}
           initialExpanded={c.name === newName}
-          onImageSave={
-            onImageSave && videos.some((v) => v.collections.includes(c.name))
-              ? (updated) => {
+          onSave={
+            onSave
+              ? (updatedCollection) => {
                   const next = [...collections];
-                  next[i] = updated;
-                  return onImageSave(next);
+                  next[i] = updatedCollection;
+                  return onSave(next);
                 }
               : undefined
           }

@@ -16,9 +16,7 @@ export default function App() {
   const [data, setData] = useState(null);
   const [videos, setVideos] = useState([]);
   const [version, setVersion] = useState(null);
-  const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState(null);
-  const [saving, setSaving] = useState(false);
   const [rescanning, setRescanning] = useState(false);
   const [fixingThumbs, setFixingThumbs] = useState(false);
   const [search, setSearch] = useState("");
@@ -30,7 +28,6 @@ export default function App() {
     if (!Array.isArray(vidData?.videos)) throw new Error("Unexpected response from /api/videos");
     setData(colData);
     setVideos(vidData.videos);
-    setDirty(false);
   }, []);
 
   useEffect(() => {
@@ -42,11 +39,9 @@ export default function App() {
 
   const setCollections = (collections) => {
     setData((d) => ({ ...d, collections }));
-    setDirty(true);
   };
 
   const saveWithCollections = async (collections, makeMsg) => {
-    setSaving(true);
     setStatus(null);
     try {
       const result = await fetchJson("/api/collections", {
@@ -67,13 +62,7 @@ export default function App() {
     } catch (e) {
       setStatus({ type: "err", msg: `Save failed: ${e.message}` });
       return false;
-    } finally {
-      setSaving(false);
     }
-  };
-
-  const save = async () => {
-    await saveWithCollections(data.collections, (r) => `Saved — ${r.matched} matched, ${r.unmatched} unmatched`);
   };
 
   const rescan = async () => {
@@ -166,7 +155,9 @@ export default function App() {
             videos={videos}
             onChange={setCollections}
             onVideoSearch={setSearch}
-            onImageSave={(updatedCollections) => saveWithCollections(updatedCollections, () => "Image saved.")}
+            onSave={(updatedCollections) =>
+              saveWithCollections(updatedCollections, (r) => `Saved — ${r.matched} matched, ${r.unmatched} unmatched`)
+            }
           />
         </div>
         <div className="col-right">
@@ -188,9 +179,6 @@ export default function App() {
           title="Ask Plex to re-fetch metadata for all videos in YAMP-managed libraries"
         >
           {rescanning ? "Scanning…" : "Trigger Plex Scan"}
-        </button>
-        <button type="button" className="btn-primary" onClick={save} disabled={!dirty || saving}>
-          {saving ? "Saving…" : "Save Changes"}
         </button>
       </div>
     </div>

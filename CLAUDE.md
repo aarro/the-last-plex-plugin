@@ -103,7 +103,18 @@ Lives at `YOUTUBE_DATA_PATH/_collection_map.json`. Schema:
 
 ### Collection Artwork
 
-Each collection can have an optional `image` URL. On `PUT /api/collections`, YAMP:
+Each collection supports four optional image URL fields, matching the four artwork slots Plex exposes for collections:
+
+| Field | Plex method | Aspect ratio | Recommended size |
+|---|---|---|---|
+| `image` | `uploadPoster` | 2:3 portrait | 680×1000 px |
+| `art` | `uploadArt` | 16:9 landscape | 1920×1080 px |
+| `logo` | `uploadLogo` | varies | PNG with transparency |
+| `square_art` | `uploadSquareArt` | 1:1 square | not formally documented |
+
+Note: YouTube thumbnails (`thumbnail` field in info.json) are 16:9 at up to 1920×1080, making them a perfect source for `art` (Background). Nothing in yt-dlp output is suitable for `logo` or `square_art`.
+
+On `PUT /api/collections`, YAMP:
 
 1. Saves the new collection list to disk immediately
 2. Runs collection matching (skipped entirely if only image/name changed — rules must differ)
@@ -114,7 +125,7 @@ The artwork sync itself:
 1. Connects to Plex via `plexapi` (`PLEX_URL` + `PLEX_TOKEN`)
 2. Finds the YAMP-managed library section (agent == `tv.plex.agents.custom.yamp`)
 3. Finds the existing Plex collection by name, or creates it by matching YAMP-tracked videos against the collection rules
-4. Calls `plex_col.uploadPoster(url=image)` to set the poster
+4. Calls the appropriate plexapi upload method for each image field that is set
 
 If the collection isn't found in Plex on the first attempt (e.g. rescan hasn't completed yet), `_sync_collection_artwork_bg` retries once after `_ARTWORK_RETRY_DELAY` seconds (default: 30). Sync failures are logged server-side.
 

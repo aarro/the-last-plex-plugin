@@ -188,22 +188,6 @@ section h2 {
   background: var(--surface2);
   border: 1px dashed var(--border);
 }
-.card-poster-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.card--expanded .card-poster-col:hover .card-poster-overlay {
-  opacity: 1;
-}
 
 /* Right column row 1: header */
 .card-header-right {
@@ -240,15 +224,6 @@ section h2 {
   grid-column: 1 / -1;
   padding: 12px 16px 16px;
   border-top: 1px solid var(--border);
-}
-
-.card-delete-row {
-  display: flex;
-  gap: 8px;
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  justify-content: flex-end;
 }
 
 .rules {
@@ -443,21 +418,186 @@ select option {
   color: var(--accent);
 }
 
-.image-edit-row {
+/* Image type chips */
+.image-chips-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.image-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.image-chip-thumb {
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface2);
+  border: 1px dashed var(--border);
+  cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 0 4px;
+  justify-content: center;
 }
-.image-edit-input {
-  flex: 1;
+.image-chip-thumb:hover {
+  border-color: var(--accent);
 }
-.image-edit-preview {
-  width: 40px;
-  height: 40px;
+.image-chip-thumb img {
+  width: 100%;
+  height: 100%;
   object-fit: cover;
+  display: block;
+}
+.image-chip-label {
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+  padding: 4px;
+}
+.image-chip[data-type="image"] .image-chip-thumb {
+  width: 50px;
+  height: 75px;
+}
+.image-chip[data-type="art"] .image-chip-thumb {
+  width: 112px;
+  height: 63px;
+}
+.image-chip[data-type="logo"] .image-chip-thumb {
+  width: 80px;
+  height: 45px;
+}
+.image-chip[data-type="square_art"] .image-chip-thumb {
+  width: 60px;
+  height: 60px;
+}
+
+/* Lightbox */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  cursor: zoom-out;
+}
+.lightbox-img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
   border-radius: 4px;
-  flex-shrink: 0;
+  cursor: default;
+}
+
+/* URL modal */
+.url-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1001;
+}
+.url-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  min-width: 380px;
+  max-width: 560px;
+  width: 90vw;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.url-modal-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.url-modal-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.url-modal-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.url-modal-preview {
+  max-width: 100%;
+  max-height: 160px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: var(--surface2);
+}
+.url-modal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Square Art suggestions */
+.suggestion-section {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.suggestion-label {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.suggestion-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
+  background: transparent;
+}
+.suggestion-chip:hover {
+  border-color: var(--accent);
+}
+.suggestion-chip img {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 50%;
+}
+.suggestion-chip span {
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+  max-width: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Card thumb section (between rules and footer) */
+.card-thumb-section {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin-top: 10px;
+}
+
+/* Card footer row */
+.card-footer-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 14px;
 }
 
 .field-error {
@@ -494,14 +634,15 @@ select option {
 }
 .thumb-strip-item img {
   width: 100%;
-  height: 68px;
+  aspect-ratio: 16 / 9;
+  height: auto;
   object-fit: cover;
   border-radius: 4px;
   display: block;
 }
 .thumb-strip-placeholder {
   width: 100%;
-  height: 68px;
+  aspect-ratio: 16 / 9;
   background: var(--surface2);
   border-radius: 4px;
 }

@@ -317,6 +317,23 @@ async def test_api_videos_corrupt_file(patched_app):
     assert "bad_id" in data.get("skipped_videos", [])
 
 
+async def test_api_videos_unicode_decode_error(patched_app):
+    """info.json with non-UTF-8 bytes → video is skipped, not a 500."""
+    index, info, tmp_path = patched_app
+    bad_path = tmp_path / "bad_unicode.info.json"
+    bad_path.write_bytes(b"\xff\xfe not valid utf-8")
+    index["bad_unicode"] = str(bad_path)
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/videos")
+    assert resp.status_code == 200
+    data = resp.json()
+    ids = [v["id"] for v in data["videos"]]
+    assert info["id"] in ids
+    assert "bad_unicode" not in ids
+    assert "bad_unicode" in data.get("skipped_videos", [])
+
+
 async def test_api_videos_no_map(patched_app):
     """No _collection_map.json → videos still returned, all unmatched."""
     _, info, tmp_path = patched_app
@@ -417,7 +434,7 @@ async def test_api_get_collections_corrupt_map(patched_app):
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/collections")
     assert resp.status_code == 500
-    assert "Could not read collection map" in resp.json()["detail"]
+    assert "_collection_map.json" in resp.json()["detail"]
 
 
 async def test_api_get_collections_plex_unreachable(patched_app, monkeypatch):
@@ -900,6 +917,21 @@ async def test_artwork_bg_exception_is_caught(monkeypatch, caplog):
     assert any("unhandled exception" in r.message.lower() for r in caplog.records)
 
 
+async def test_artwork_bg_cancelled_error_propagates(monkeypatch):
+    """asyncio.CancelledError is re-raised, not swallowed, so shutdown can proceed."""
+    import asyncio
+
+    col = MagicMock()
+    col.name = "Test"
+
+    def _cancel(_col):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork", _cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await yamp_app._sync_collection_artwork_bg(col)
+
+
 async def test_artwork_bg_retry_non_not_found_failure(monkeypatch, caplog):
     """First call returns not_found_in_plex; retry returns a different failure (not not_found_in_plex).
     The else-branch logs 'retry failed' and does not re-raise."""
@@ -941,6 +973,35 @@ def test_sync_collection_artwork_sections_failure(monkeypatch):
     assert result["ok"] is False
     assert "not_found_in_plex" not in result
     assert "Could not list Plex sections" in result["error"]
+
+
+def test_sync_collection_artwork_find_items_plex_error(monkeypatch):
+    """_find_matching_plex_items raises _PLEX_ERRS → caught, returns ok:False without raising.
+
+    Ensures transient Plex errors during item listing don't bypass the retry logic in
+    _sync_collection_artwork_bg by propagating as an unhandled exception.
+    """
+    import requests.exceptions
+    from plexapi.exceptions import NotFound
+
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="http://example.com/img.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_section = MagicMock()
+    mock_section.agent = yamp_app.IDENTIFIER
+    mock_section.collection.side_effect = NotFound("not found")
+    # section.all() (called inside _find_matching_plex_items) raises a network error
+    mock_section.all.side_effect = requests.exceptions.ConnectionError("network hiccup")
+    mock_plex = MagicMock()
+    mock_plex.library.sections.return_value = [mock_section]
+
+    with patch("plexapi.server.PlexServer", return_value=mock_plex):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is False
+    assert "not_found_in_plex" not in result
+    assert "Could not list items" in result["error"]
 
 
 async def test_put_collections_plex_sync_flag_with_credentials(patched_app, monkeypatch):
@@ -1061,7 +1122,7 @@ async def test_do_rescan_bg_failed_sections_are_logged(monkeypatch, caplog):
 
 
 def test_sync_collection_artwork_no_image(monkeypatch):
-    """col.image is falsy → early return with ok:False and no Plex call."""
+    """All image fields (image, art, logo, square_art) are None → early return with ok:False, no Plex call."""
     col = yamp_app.CollectionModel(name="Test", rules=[], image=None)
     monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
     monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
@@ -1143,7 +1204,8 @@ def test_sync_collection_artwork_upload_poster_failure(monkeypatch):
 
     assert result["ok"] is False
     assert "not_found_in_plex" not in result
-    assert "Poster upload failed" in result["error"]
+    assert isinstance(result["error"], dict)
+    assert "uploadPoster failed" in result["error"]["image"]
 
 
 async def test_artwork_bg_retry_success_is_logged(monkeypatch, caplog):
@@ -1185,7 +1247,9 @@ def test_build_index_read_errors_are_aggregated(tmp_path, caplog):
         index, _ = build_index(str(tmp_path))
 
     assert len(index) == 0
-    assert any("failed to read" in r.message.lower() for r in caplog.records)
+    error_msgs = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("failed to read" in m.lower() for m in error_msgs)
+    assert any("1" in m for m in error_msgs), "error count should be 1"
 
 
 # ── POST /api/index/rebuild ───────────────────────────────────────────────────
@@ -1508,6 +1572,19 @@ async def test_api_fix_thumbnails_plex_connection_failure(patched_app, monkeypat
     assert "Plex connection failed" in resp.json()["detail"]
 
 
+async def test_api_fix_thumbnails_xml_parse_error(patched_app, monkeypatch):
+    """PlexServer() raises ET.ParseError (malformed XML) → HTTP 502, not an unhandled exception."""
+    import xml.etree.ElementTree as ET
+
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    with patch("plexapi.server.PlexServer", side_effect=ET.ParseError("malformed XML")):
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/thumbnails/fix")
+    assert resp.status_code == 502
+    assert "Plex connection failed" in resp.json()["detail"]
+
+
 async def test_api_fix_thumbnails_section_listing_failure(patched_app, monkeypatch):
     """plex.library.sections() raises → HTTP 502 with error detail."""
     from plexapi.exceptions import PlexApiException
@@ -1682,3 +1759,600 @@ def test_build_index_unicode_decode_error(tmp_path):
 
     assert valid_id in index
     assert len(index) == 1  # bad file was silently skipped, not raised
+
+
+# ── GET /api/channel-art ──────────────────────────────────────────────────────
+
+
+async def test_api_channel_art_cache_hit(patched_app, monkeypatch):
+    """Cache hit: options returned immediately, pending: false."""
+    url = "https://www.youtube.com/c/TestChannel"
+    art = {"channel": "Test Channel", "avatar_url": "https://img/av.jpg", "banner_url": ""}
+    monkeypatch.setitem(yamp_app._channel_art_cache, url, art)
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _name: [url])
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/channel-art?collection=TestCollection")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["pending"] is False
+    assert len(data["options"]) == 1
+    assert data["options"][0]["uploader_url"] == url
+    assert data["options"][0]["channel"] == "Test Channel"
+
+
+async def test_api_channel_art_cache_miss(patched_app, monkeypatch):
+    """Cache miss: returns empty options with pending: true."""
+    url = "https://www.youtube.com/c/MissingChannel"
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _name: [url])
+    # Ensure cache is empty for this URL
+    yamp_app._channel_art_cache.pop(url, None)
+    # Prevent the background prefetch from actually running yt-dlp
+    mock_prefetch = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_prefetch_channel_art_bg", mock_prefetch)
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/channel-art?collection=TestCollection")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["pending"] is True
+    assert data["options"] == []
+
+
+async def test_api_channel_art_unknown_collection(patched_app, monkeypatch):
+    """Collection not found or has no YouTube URLs: returns empty, not pending."""
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _name: [])
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/channel-art?collection=NoSuchCollection")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["pending"] is False
+    assert data["options"] == []
+
+
+# ── _sync_collection_artwork multi-field ──────────────────────────────────────
+
+
+def _make_artwork_sync_mocks(agent=None):
+    """Return (mock_server, mock_section, mock_plex_col) configured for artwork sync tests."""
+    mock_plex_col = MagicMock()
+    mock_section = MagicMock()
+    mock_section.agent = agent or yamp_app.IDENTIFIER
+    mock_section.collection.return_value = mock_plex_col
+    mock_server = MagicMock()
+    mock_server.library.sections.return_value = [mock_section]
+    return mock_server, mock_section, mock_plex_col
+
+
+def test_sync_collection_artwork_art_only(monkeypatch):
+    """Collection with only 'art' set → uploadArt called, uploadPoster not called."""
+    col = yamp_app.CollectionModel(name="Test", rules=[], art="https://example.com/bg.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is True
+    mock_plex_col.uploadArt.assert_called_once_with(url="https://example.com/bg.jpg")
+    mock_plex_col.uploadPoster.assert_not_called()
+
+
+def test_sync_collection_artwork_logo_only(monkeypatch):
+    """Collection with only 'logo' set → uploadLogo called, other methods not called."""
+    col = yamp_app.CollectionModel(name="Test", rules=[], logo="https://example.com/logo.png")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is True
+    mock_plex_col.uploadLogo.assert_called_once_with(url="https://example.com/logo.png")
+    mock_plex_col.uploadPoster.assert_not_called()
+    mock_plex_col.uploadArt.assert_not_called()
+    mock_plex_col.uploadSquareArt.assert_not_called()
+
+
+def test_sync_collection_artwork_square_art_only(monkeypatch):
+    """Collection with only 'square_art' set → uploadSquareArt called, other methods not called."""
+    col = yamp_app.CollectionModel(name="Test", rules=[], square_art="https://example.com/square.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is True
+    mock_plex_col.uploadSquareArt.assert_called_once_with(url="https://example.com/square.jpg")
+    mock_plex_col.uploadPoster.assert_not_called()
+    mock_plex_col.uploadArt.assert_not_called()
+    mock_plex_col.uploadLogo.assert_not_called()
+
+
+def test_sync_collection_artwork_image_and_art(monkeypatch):
+    """Collection with both 'image' and 'art' → both upload methods called, ok: True."""
+    col = yamp_app.CollectionModel(
+        name="Test",
+        rules=[],
+        image="https://example.com/poster.jpg",
+        art="https://example.com/bg.jpg",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is True
+    mock_plex_col.uploadPoster.assert_called_once_with(url="https://example.com/poster.jpg")
+    mock_plex_col.uploadArt.assert_called_once_with(url="https://example.com/bg.jpg")
+
+
+def test_sync_collection_artwork_partial_failure(monkeypatch):
+    """First upload (image) succeeds, second (art) fails → ok: False with per-field error dict.
+
+    Returns immediately once the collection is found — does not try subsequent sections.
+    """
+    from plexapi.exceptions import PlexApiException
+
+    col = yamp_app.CollectionModel(
+        name="Test",
+        rules=[],
+        image="https://example.com/poster.jpg",
+        art="https://example.com/bg.jpg",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    mock_plex_col.uploadArt.side_effect = PlexApiException("art upload rejected")
+
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is False
+    # poster upload still attempted and succeeded (no exception raised)
+    mock_plex_col.uploadPoster.assert_called_once()
+    # error is a dict keyed by field name
+    assert isinstance(result["error"], dict)
+    assert "art" in result["error"]
+    assert "image" not in result["error"]
+
+
+# ── PUT /api/collections — non-image field change detection ───────────────────
+
+
+async def test_put_collections_art_field_triggers_artwork_sync(patched_app, monkeypatch):
+    """Changing only the 'art' field (no rule changes) queues artwork sync but not rescan."""
+    _, _, tmp_path = patched_app
+    existing = [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}], "art": None}]
+    map_file = tmp_path / "_collection_map.json"
+    map_file.write_text(
+        json.dumps({"collections": existing, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_rescan = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_do_rescan_bg", mock_rescan)
+    mock_artwork = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork_bg", mock_artwork)
+
+    updated = [
+        {
+            "name": "Jazz",
+            "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}],
+            "art": "https://example.com/jazz-bg.jpg",
+        }
+    ]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": updated})
+
+    assert resp.status_code == 200
+    mock_rescan.assert_not_awaited()
+    mock_artwork.assert_awaited_once()
+
+
+# ── _fetch_channel_art ────────────────────────────────────────────────────────
+
+
+def test_fetch_channel_art_non_youtube_url():
+    """Non-YouTube URL returns None without importing or calling yt-dlp."""
+    import builtins
+
+    from app import _fetch_channel_art
+
+    real_import = builtins.__import__
+
+    def _raise_if_yt_dlp(name, *args, **kwargs):
+        if name == "yt_dlp":
+            raise AssertionError("yt_dlp must not be imported for non-YouTube URLs")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = _raise_if_yt_dlp
+    try:
+        result = _fetch_channel_art("https://vimeo.com/channels/foo")
+    finally:
+        builtins.__import__ = real_import
+
+    assert result is None
+
+
+def test_fetch_channel_art_import_error(monkeypatch):
+    """ImportError (yt-dlp not installed) returns None and logs an error."""
+    import builtins
+
+    from app import _fetch_channel_art
+
+    real_import = builtins.__import__
+
+    def _block_yt_dlp(name, *args, **kwargs):
+        if name == "yt_dlp":
+            raise ImportError("No module named 'yt_dlp'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _block_yt_dlp)
+    result = _fetch_channel_art("https://www.youtube.com/@TestChannel")
+    assert result is None
+
+
+def test_fetch_channel_art_exception_returns_none():
+    """Unexpected exception from yt-dlp returns None (logged, not raised)."""
+    from unittest.mock import patch
+
+    from app import _fetch_channel_art
+
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info.side_effect = RuntimeError("yt-dlp exploded")
+
+    mock_module = MagicMock()
+    mock_module.YoutubeDL.return_value = mock_ydl
+
+    with patch.dict("sys.modules", {"yt_dlp": mock_module}):
+        result = _fetch_channel_art("https://www.youtube.com/@TestChannel")
+
+    assert result is None
+
+
+# ── _prefetch_channel_art_bg — error handling ────────────────────────────────
+
+
+async def test_prefetch_channel_art_bg_clears_in_progress_on_exception(monkeypatch):
+    """_prefetch_in_progress is cleared even when _fetch_channel_art raises."""
+    from unittest.mock import patch
+
+    monkeypatch.setattr(
+        yamp_app,
+        "_get_channel_urls_for_collection",
+        lambda _: ["https://www.youtube.com/@TestChannel"],
+    )
+    with patch("app._fetch_channel_art", side_effect=RuntimeError("boom")):
+        await yamp_app._prefetch_channel_art_bg(["TestCollection"])
+
+    assert "TestCollection" not in yamp_app._prefetch_in_progress
+
+
+async def test_prefetch_channel_art_bg_caches_error_sentinel(monkeypatch):
+    """When _fetch_channel_art returns None, the URL is cached as an error sentinel."""
+    from unittest.mock import patch
+
+    url = "https://www.youtube.com/@ErrorChannel"
+    yamp_app._channel_art_cache.pop(url, None)
+
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _: [url])
+
+    with patch("app._fetch_channel_art", return_value=None):
+        await yamp_app._prefetch_channel_art_bg(["TestCollection"])
+
+    assert url in yamp_app._channel_art_cache
+    assert yamp_app._channel_art_cache[url] is yamp_app._FETCH_ERROR_SENTINEL
+    yamp_app._channel_art_cache.pop(url, None)
+
+
+# ── GET /api/channel-art — fetch_error flag ───────────────────────────────────
+
+
+async def test_api_channel_art_fetch_error_flag(patched_app, monkeypatch):
+    """If cache holds a _fetch_error sentinel, response includes fetch_error: true."""
+    url = "https://www.youtube.com/@BrokenChannel"
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _: [url])
+    yamp_app._channel_art_cache[url] = yamp_app._FETCH_ERROR_SENTINEL
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/channel-art?collection=TestCollection")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["fetch_error"] is True
+    assert data["options"] == []
+    assert data["pending"] is False
+    yamp_app._channel_art_cache.pop(url, None)
+
+
+# ── _get_channel_urls_for_collection — internal branches ─────────────────────
+
+
+def test_get_channel_urls_deduplication(tmp_path, monkeypatch):
+    """Same uploader_url across multiple matched videos appears only once."""
+    from collection_map import save_map
+
+    url = "https://www.youtube.com/@GoGoPenguin"
+    ids = ["vid111aaaaa", "vid222bbbbb"]
+    for vid in ids:
+        info = {
+            "id": vid,
+            "title": f"Video {vid}",
+            "tags": ["jazz"],
+            "uploader_url": url,
+            "channel": "GoGo Penguin",
+        }
+        (tmp_path / f"{vid}.info.json").write_text(json.dumps(info), encoding="utf-8")
+
+    col_map = {
+        "collections": [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}]}],
+        "matched_ids": ids,
+        "unmatched_ids": [],
+        "unmatched_tags": {},
+    }
+    save_map(str(tmp_path / "_collection_map.json"), col_map)
+
+    monkeypatch.setattr(yamp_app, "_video_index", {vid: str(tmp_path / f"{vid}.info.json") for vid in ids})
+    # meta cache provides the match fields so the function skips disk reads for filtering
+    meta = {"tags": ["jazz"], "channel": "GoGo Penguin"}
+    monkeypatch.setattr(yamp_app, "_video_meta_cache", {vid: meta for vid in ids})
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+
+    result = yamp_app._get_channel_urls_for_collection("Jazz")
+    assert result == [url]  # deduplicated to one entry
+
+
+def test_get_channel_urls_unicode_decode_error_skipped(tmp_path, monkeypatch):
+    """A non-UTF-8 info.json is skipped (logged) rather than raising."""
+    from collection_map import save_map
+
+    valid_id = "validID12345"
+    bad_id = "badIDxxxxxxx"
+    valid_url = "https://www.youtube.com/@Valid"
+
+    (tmp_path / f"{valid_id}.info.json").write_text(
+        json.dumps({"id": valid_id, "title": "Valid", "tags": ["jazz"], "uploader_url": valid_url, "channel": "Valid"}),
+        encoding="utf-8",
+    )
+    (tmp_path / f"{bad_id}.info.json").write_bytes(b"\xff\xfe bad utf-8")
+
+    col_map = {
+        "collections": [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}]}],
+        "matched_ids": [valid_id, bad_id],
+        "unmatched_ids": [],
+        "unmatched_tags": {},
+    }
+    save_map(str(tmp_path / "_collection_map.json"), col_map)
+
+    monkeypatch.setattr(
+        yamp_app,
+        "_video_index",
+        {
+            valid_id: str(tmp_path / f"{valid_id}.info.json"),
+            bad_id: str(tmp_path / f"{bad_id}.info.json"),
+        },
+    )
+    # Both IDs match via meta cache; the bad_id then fails on the disk read for uploader_url.
+    monkeypatch.setattr(
+        yamp_app,
+        "_video_meta_cache",
+        {
+            valid_id: {"tags": ["jazz"], "channel": "Valid"},
+            bad_id: {"tags": ["jazz"], "channel": "Valid"},
+        },
+    )
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+
+    result = yamp_app._get_channel_urls_for_collection("Jazz")
+    assert result == [valid_url]  # bad_id skipped, valid_id included
+
+
+# ── _sync_collection_artwork — multi-section ─────────────────────────────────
+
+
+def test_sync_collection_artwork_second_section_tried_after_first_miss(monkeypatch):
+    """When collection is absent from section 1 but present in section 2, sync succeeds."""
+    from unittest.mock import patch
+
+    from plexapi.exceptions import NotFound
+
+    col = yamp_app.CollectionModel(name="Jazz", rules=[], image="https://example.com/poster.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_plex_col = MagicMock()
+    section1 = MagicMock()
+    section1.agent = yamp_app.IDENTIFIER
+    section1.collection.side_effect = NotFound("not found")
+    section2 = MagicMock()
+    section2.agent = yamp_app.IDENTIFIER
+    section2.collection.return_value = mock_plex_col
+
+    mock_server = MagicMock()
+    mock_server.library.sections.return_value = [section1, section2]
+
+    with (
+        patch("app._find_matching_plex_items", return_value=[]),
+        patch("plexapi.server.PlexServer", return_value=mock_server),
+    ):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is True
+    mock_plex_col.uploadPoster.assert_called_once_with(url="https://example.com/poster.jpg")
+
+
+def test_sync_collection_artwork_plex_err_on_section1_section2_succeeds(monkeypatch):
+    """Section 1 raises a _PLEX_ERRS connection error; section 2 has the collection — ok: True."""
+    from unittest.mock import patch
+
+    import requests
+
+    col = yamp_app.CollectionModel(name="Jazz", rules=[], image="https://example.com/poster.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_plex_col = MagicMock()
+    section1 = MagicMock()
+    section1.agent = yamp_app.IDENTIFIER
+    section1.collection.side_effect = requests.exceptions.ConnectionError("refused")
+    section2 = MagicMock()
+    section2.agent = yamp_app.IDENTIFIER
+    section2.collection.return_value = mock_plex_col
+
+    mock_server = MagicMock()
+    mock_server.library.sections.return_value = [section1, section2]
+
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is True
+    mock_plex_col.uploadPoster.assert_called_once_with(url="https://example.com/poster.jpg")
+
+
+# ── PUT /api/collections — logo / square_art field change detection ────────────
+
+
+async def test_put_collections_logo_field_triggers_artwork_sync(patched_app, monkeypatch):
+    """Changing only the 'logo' field queues artwork sync but not rescan."""
+    _, _, tmp_path = patched_app
+    existing = [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}], "logo": None}]
+    map_file = tmp_path / "_collection_map.json"
+    map_file.write_text(
+        json.dumps({"collections": existing, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_rescan = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_do_rescan_bg", mock_rescan)
+    mock_artwork = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork_bg", mock_artwork)
+
+    updated = [
+        {
+            "name": "Jazz",
+            "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}],
+            "logo": "https://example.com/jazz-logo.png",
+        }
+    ]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": updated})
+
+    assert resp.status_code == 200
+    mock_rescan.assert_not_awaited()
+    mock_artwork.assert_awaited_once()
+
+
+async def test_put_collections_square_art_field_triggers_artwork_sync(patched_app, monkeypatch):
+    """Changing only the 'square_art' field queues artwork sync but not rescan."""
+    _, _, tmp_path = patched_app
+    rule = {"field": "tags", "match": "exact", "values": ["jazz"]}
+    existing = [{"name": "Jazz", "rules": [rule], "square_art": None}]
+    map_file = tmp_path / "_collection_map.json"
+    map_file.write_text(
+        json.dumps({"collections": existing, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_rescan = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_do_rescan_bg", mock_rescan)
+    mock_artwork = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork_bg", mock_artwork)
+
+    updated = [
+        {
+            "name": "Jazz",
+            "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}],
+            "square_art": "https://example.com/jazz-square.jpg",
+        }
+    ]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": updated})
+
+    assert resp.status_code == 200
+    mock_rescan.assert_not_awaited()
+    mock_artwork.assert_awaited_once()
+
+
+async def test_put_collections_rule_change_with_no_image_skips_artwork_sync(patched_app, monkeypatch):
+    """Rule change with all image fields None → rescan triggered, artwork sync NOT triggered."""
+    _, _, tmp_path = patched_app
+    map_file = tmp_path / "_collection_map.json"
+    map_file.write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_rescan = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_do_rescan_bg", mock_rescan)
+    mock_artwork = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork_bg", mock_artwork)
+
+    # New collection with rules but no image fields
+    new_col = [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}]}]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": new_col})
+
+    assert resp.status_code == 200
+    mock_rescan.assert_awaited_once()
+    mock_artwork.assert_not_awaited()
+
+
+# ── _prefetch_channel_art_bg — dedup guard ────────────────────────────────────
+
+
+async def test_prefetch_channel_art_bg_dedup_guard(monkeypatch):
+    """A collection name already in _prefetch_in_progress is skipped without calling _get_channel_urls."""
+    called = []
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda name: called.append(name) or [])
+
+    yamp_app._prefetch_in_progress.add("AlreadyRunning")
+    try:
+        await yamp_app._prefetch_channel_art_bg(["AlreadyRunning"])
+    finally:
+        yamp_app._prefetch_in_progress.discard("AlreadyRunning")
+
+    assert "AlreadyRunning" not in called
+
+
+# ── GET /api/channel-art — pending + fetch_error co-occurrence ────────────────
+
+
+async def test_api_channel_art_pending_and_fetch_error(patched_app, monkeypatch):
+    """pending: true and fetch_error: true can both be set when one URL errored and another is missing."""
+    errored_url = "https://www.youtube.com/@BrokenChannel"
+    missing_url = "https://www.youtube.com/@PendingChannel"
+
+    monkeypatch.setattr(yamp_app, "_get_channel_urls_for_collection", lambda _: [errored_url, missing_url])
+    yamp_app._channel_art_cache[errored_url] = yamp_app._FETCH_ERROR_SENTINEL
+    yamp_app._channel_art_cache.pop(missing_url, None)
+
+    mock_prefetch = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_prefetch_channel_art_bg", mock_prefetch)
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/channel-art?collection=TestCollection")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["fetch_error"] is True
+    assert data["pending"] is True
+    assert data["options"] == []
+    yamp_app._channel_art_cache.pop(errored_url, None)

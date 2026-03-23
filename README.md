@@ -20,7 +20,7 @@ Plex deprecated their legacy Python plugin framework in 2026. This replaces the 
 - **Discover panel** — browse unmatched (or all) videos, search by title/channel/tag, click any tag to instantly create a collection from it; click a video thumbnail in a collection to search for it in the Discover panel
 - **Rescan button** — trigger a Plex metadata refresh directly from the UI
 - **Fix Thumbnails button** — backfill thumbnails for all existing videos; preserves existing Plex posters for videos where YAMP has no thumbnail to offer
-- **Version display** — running version shown in the UI header (matches the Docker image tag)
+- **Version display** — running version shown in the action bar (matches the Docker image tag)
 - **Makefile** for common dev tasks: `make test`, `make build`, `make dev`, `make docker-up`, etc.
 - **Docker Compose** setup with Plex + MeTube + YAMP all sharing one volume
 

@@ -15,7 +15,10 @@ export default function DiscoverPanel({ videos, search, onSearch }) {
     if (navigator.clipboard) {
       navigator.clipboard.writeText(tag).then(
         () => setToast(`Copied "${tag}"`),
-        () => setToast(`Copy failed — paste manually: ${tag}`)
+        (err) => {
+          console.warn("clipboard.writeText failed:", err);
+          setToast(`Copy failed — paste manually: ${tag}`);
+        }
       );
     } else {
       const el = document.createElement("textarea");
@@ -56,13 +59,20 @@ export default function DiscoverPanel({ videos, search, onSearch }) {
       <h2>Discover</h2>
       {toast && <div className="toast">{toast}</div>}
 
-      <input
-        type="text"
-        placeholder="Search title, channel, or tags…"
-        value={search}
-        onChange={(e) => onSearch(e.target.value)}
-        className="discover-search"
-      />
+      <div className="discover-search-wrap">
+        <input
+          type="text"
+          placeholder="Search title, channel, or tags…"
+          value={search}
+          onChange={(e) => onSearch(e.target.value)}
+          className="discover-search"
+        />
+        {search && (
+          <button type="button" className="discover-search-clear" onClick={() => onSearch("")} title="Clear search">
+            ×
+          </button>
+        )}
+      </div>
 
       <div className="discover-filters">
         <button

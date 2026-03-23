@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import requests
 from httpx import ASGITransport
 
 import app as yamp_app
@@ -437,7 +438,7 @@ async def test_api_get_collections_plex_unreachable(patched_app, monkeypatch):
     monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
 
     def _raise():
-        raise Exception("boom")
+        raise requests.exceptions.RequestException("boom")
 
     monkeypatch.setattr(yamp_app, "_fetch_plex_collection_thumbs", _raise)
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -742,7 +743,7 @@ async def test_api_rescan_happy_path(monkeypatch):
         with patch("httpx.AsyncClient", return_value=mock_client):
             resp = await client.post("/api/rescan")
     assert resp.status_code == 200
-    assert resp.json() == {"triggered_sections": ["1"], "failed_sections": []}
+    assert resp.json() == {"triggered_sections": [{"id": "1", "title": "YouTube Movies"}], "failed_sections": []}
 
 
 async def test_api_rescan_no_yamp_sections(monkeypatch):
@@ -770,7 +771,7 @@ async def test_api_rescan_per_section_timeout(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["triggered_sections"] == []
-    assert data["failed_sections"] == [{"section_id": "1", "error": "timeout"}]
+    assert data["failed_sections"] == [{"id": "1", "error": "timeout"}]
 
 
 async def test_api_rescan_non_numeric_key(monkeypatch):
@@ -786,6 +787,19 @@ async def test_api_rescan_non_numeric_key(monkeypatch):
     assert resp.json() == {"triggered_sections": [], "failed_sections": []}
 
 
+async def test_api_rescan_missing_title_key(monkeypatch):
+    """Section without a 'title' key falls back to using the section key as title."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    sections = [{"key": "1", "agent": yamp_app.IDENTIFIER}]  # no "title"
+    mock_client = _make_rescan_mock(sections)
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post("/api/rescan")
+    assert resp.status_code == 200
+    assert resp.json() == {"triggered_sections": [{"id": "1", "title": "Section 1"}], "failed_sections": []}
+
+
 async def test_api_rescan_no_plex_config(monkeypatch):
     """Missing PLEX_URL/PLEX_TOKEN → 400."""
     monkeypatch.setattr(yamp_app, "PLEX_URL", "")
@@ -793,6 +807,385 @@ async def test_api_rescan_no_plex_config(monkeypatch):
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/api/rescan")
     assert resp.status_code == 400
+
+
+# ── _sync_collection_artwork_bg ───────────────────────────────────────────────
+
+
+async def test_artwork_bg_success_no_retry(monkeypatch):
+    """First call succeeds → _sync_collection_artwork called once, sleep never called."""
+    col = MagicMock()
+    col.name = "Test"
+    call_count = [0]
+
+    def _sync(_col):
+        call_count[0] += 1
+        return {"ok": True, "created": False}
+
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork", _sync)
+    with patch("app.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await yamp_app._sync_collection_artwork_bg(col)
+
+    assert call_count[0] == 1
+    mock_sleep.assert_not_called()
+
+
+async def test_artwork_bg_retry_on_not_found_succeeds(monkeypatch):
+    """First call returns not_found_in_plex → sleep then retry; retry succeeds."""
+    col = MagicMock()
+    col.name = "Test"
+    results = [
+        {"ok": False, "not_found_in_plex": True, "error": "'Test' not in Plex and no matched videos found"},
+        {"ok": True, "created": True},
+    ]
+    call_count = [0]
+
+    def _sync(_col):
+        r = results[call_count[0]]
+        call_count[0] += 1
+        return r
+
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork", _sync)
+    with patch("app.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await yamp_app._sync_collection_artwork_bg(col)
+
+    assert call_count[0] == 2
+    mock_sleep.assert_called_once_with(yamp_app._ARTWORK_RETRY_DELAY)
+
+
+async def test_artwork_bg_retry_also_fails(monkeypatch, caplog):
+    """Both calls return not_found_in_plex → retry-failed error is logged."""
+    import logging
+
+    col = MagicMock()
+    col.name = "Test"
+    not_found = {"ok": False, "not_found_in_plex": True, "error": "'Test' not in Plex and no matched videos found"}
+
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork", lambda _col: not_found)
+    with patch("app.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, caplog.at_level(logging.ERROR):
+        await yamp_app._sync_collection_artwork_bg(col)
+
+    mock_sleep.assert_called_once_with(yamp_app._ARTWORK_RETRY_DELAY)
+    assert any("still not found in plex after retry" in r.message.lower() for r in caplog.records)
+
+
+async def test_artwork_bg_non_not_found_failure_no_retry(monkeypatch):
+    """First call fails without not_found_in_plex → no sleep, no retry."""
+    col = MagicMock()
+    col.name = "Test"
+    monkeypatch.setattr(
+        yamp_app,
+        "_sync_collection_artwork",
+        lambda _col: {"ok": False, "error": "Plex connection failed"},
+    )
+    with patch("app.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await yamp_app._sync_collection_artwork_bg(col)
+    mock_sleep.assert_not_called()
+
+
+async def test_artwork_bg_exception_is_caught(monkeypatch, caplog):
+    """Exception raised inside _sync_collection_artwork is caught; does not propagate."""
+    import logging
+
+    col = MagicMock()
+    col.name = "Test"
+
+    def _boom(_col):
+        raise RuntimeError("unexpected crash")
+
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork", _boom)
+    with caplog.at_level(logging.ERROR):
+        await yamp_app._sync_collection_artwork_bg(col)  # must not raise
+
+    assert any("unhandled exception" in r.message.lower() for r in caplog.records)
+
+
+async def test_artwork_bg_retry_non_not_found_failure(monkeypatch, caplog):
+    """First call returns not_found_in_plex; retry returns a different failure (not not_found_in_plex).
+    The else-branch logs 'retry failed' and does not re-raise."""
+    import logging
+
+    col = MagicMock()
+    col.name = "Test"
+    results = [
+        {"ok": False, "not_found_in_plex": True, "error": "not found"},
+        {"ok": False, "error": "Plex poster upload failed"},
+    ]
+    call_count = [0]
+
+    def _sync(_col):
+        r = results[call_count[0]]
+        call_count[0] += 1
+        return r
+
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork", _sync)
+    with patch("app.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, caplog.at_level(logging.ERROR):
+        await yamp_app._sync_collection_artwork_bg(col)  # must not raise
+
+    assert call_count[0] == 2
+    mock_sleep.assert_called_once_with(yamp_app._ARTWORK_RETRY_DELAY)
+    assert any("retry failed" in r.message.lower() for r in caplog.records)
+
+
+def test_sync_collection_artwork_sections_failure(monkeypatch):
+    """plex.library.sections() raises → returns ok:False without not_found_in_plex."""
+    import requests.exceptions
+
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="http://example.com/img.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_plex = MagicMock()
+    mock_plex.library.sections.side_effect = requests.exceptions.ConnectionError("refused")
+    with patch("plexapi.server.PlexServer", return_value=mock_plex):
+        result = yamp_app._sync_collection_artwork(col)
+    assert result["ok"] is False
+    assert "not_found_in_plex" not in result
+    assert "Could not list Plex sections" in result["error"]
+
+
+async def test_put_collections_plex_sync_flag_with_credentials(patched_app, monkeypatch):
+    """plex_sync is True only when background tasks are actually queued, not just because credentials are set.
+
+    empty→empty with no image changes: no tasks queued → plex_sync: false.
+    """
+    _, _, tmp_path = patched_app
+    map_file = tmp_path / "_collection_map.json"
+    map_file.write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_rescan = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_do_rescan_bg", mock_rescan)
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": []})
+    assert resp.status_code == 200
+    # empty→empty: no rule changes, no image changes → no tasks queued → plex_sync: false
+    assert resp.json()["plex_sync"] is False
+    mock_rescan.assert_not_awaited()
+
+
+async def test_put_collections_rescan_triggered_on_rule_changes(patched_app, monkeypatch):
+    """PUT /api/collections with rule changes → rescan IS triggered."""
+    _, _, tmp_path = patched_app
+    map_file = tmp_path / "_collection_map.json"
+    map_file.write_text(
+        json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_rescan = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_do_rescan_bg", mock_rescan)
+    # Adding a new collection is a rule change
+    new_col = [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}], "image": None}]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": new_col})
+    assert resp.status_code == 200
+    mock_rescan.assert_awaited_once()
+
+
+async def test_put_collections_rescan_only_on_rule_changes(patched_app, monkeypatch):
+    """PUT /api/collections with only an image change → rescan is NOT triggered (no rule changes)."""
+    _, _, tmp_path = patched_app
+    existing = [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}], "image": None}]
+    map_file = tmp_path / "_collection_map.json"
+    map_file.write_text(
+        json.dumps({"collections": existing, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_rescan = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_do_rescan_bg", mock_rescan)
+    mock_artwork = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork_bg", mock_artwork)
+    # Same rules, only image changed
+    updated = [
+        {
+            "name": "Jazz",
+            "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}],
+            "image": "https://example.com/jazz.jpg",
+        }
+    ]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": updated})
+    assert resp.status_code == 200
+    mock_rescan.assert_not_awaited()
+    mock_artwork.assert_awaited_once()
+
+
+async def test_do_rescan_bg_catches_http_exception(monkeypatch, caplog):
+    """HTTPException raised inside _do_rescan is caught and logged; does not propagate."""
+    import logging
+
+    from fastapi import HTTPException
+
+    async def _raise():
+        raise HTTPException(status_code=503, detail="Plex unreachable")
+
+    monkeypatch.setattr(yamp_app, "_do_rescan", _raise)
+    with caplog.at_level(logging.ERROR):
+        await yamp_app._do_rescan_bg()  # must not raise
+
+    assert any("Plex unreachable" in r.message for r in caplog.records)
+
+
+async def test_do_rescan_bg_bare_exception_is_caught(monkeypatch, caplog):
+    """RuntimeError raised inside _do_rescan is caught by the broad except clause; does not propagate."""
+    import logging
+
+    async def _raise():
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(yamp_app, "_do_rescan", _raise)
+    with caplog.at_level(logging.ERROR):
+        await yamp_app._do_rescan_bg()  # must not raise
+
+    assert any("unhandled exception" in r.message.lower() for r in caplog.records)
+
+
+async def test_do_rescan_bg_failed_sections_are_logged(monkeypatch, caplog):
+    """failed_sections in _do_rescan result → error is logged."""
+    import logging
+
+    async def _return_failures():
+        return {"triggered_sections": [], "failed_sections": [{"id": "1", "error": "timeout"}]}
+
+    monkeypatch.setattr(yamp_app, "_do_rescan", _return_failures)
+    with caplog.at_level(logging.ERROR):
+        await yamp_app._do_rescan_bg()
+
+    assert any("failed sections" in r.message.lower() for r in caplog.records)
+
+
+def test_sync_collection_artwork_no_image(monkeypatch):
+    """col.image is falsy → early return with ok:False and no Plex call."""
+    col = yamp_app.CollectionModel(name="Test", rules=[], image=None)
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    with patch("plexapi.server.PlexServer") as mock_plex_cls:
+        result = yamp_app._sync_collection_artwork(col)
+    mock_plex_cls.assert_not_called()
+    assert result["ok"] is False
+    assert "no image" in result["error"]
+
+
+def test_sync_collection_artwork_no_yamp_sections(monkeypatch):
+    """plex.library.sections() returns no YAMP-managed sections → ok:False, not not_found_in_plex."""
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="http://example.com/img.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_plex = MagicMock()
+    # Return sections with a different agent — none are YAMP-managed
+    mock_section = MagicMock()
+    mock_section.agent = "com.plexapp.agents.imdb"
+    mock_plex.library.sections.return_value = [mock_section]
+    with patch("plexapi.server.PlexServer", return_value=mock_plex):
+        result = yamp_app._sync_collection_artwork(col)
+    assert result["ok"] is False
+    assert "not_found_in_plex" not in result
+    assert "No YAMP-managed sections" in result["error"]
+
+
+def test_sync_collection_artwork_collection_lookup_failure(monkeypatch):
+    """Non-NotFound Plex error on section.collection() → structured error, not an exception."""
+    from plexapi.exceptions import PlexApiException
+
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="http://example.com/img.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_plex = MagicMock()
+    mock_section = MagicMock()
+    mock_section.agent = yamp_app.IDENTIFIER
+    mock_section.collection.side_effect = PlexApiException("BadRequest")
+    mock_plex.library.sections.return_value = [mock_section]
+    with patch("plexapi.server.PlexServer", return_value=mock_plex):
+        result = yamp_app._sync_collection_artwork(col)
+    assert result["ok"] is False
+    assert "not_found_in_plex" not in result
+    assert "Collection lookup failed" in result["error"]
+
+
+def test_sync_collection_artwork_xml_parse_error(monkeypatch):
+    """xml.etree.ElementTree.ParseError on PlexServer() → structured error, not an exception."""
+    import xml.etree.ElementTree as ET
+
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="http://example.com/img.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    with patch("plexapi.server.PlexServer", side_effect=ET.ParseError("malformed XML")):
+        result = yamp_app._sync_collection_artwork(col)
+    assert result["ok"] is False
+    assert "Plex connection failed" in result["error"]
+
+
+def test_sync_collection_artwork_upload_poster_failure(monkeypatch):
+    """uploadPoster raising PlexApiException → ok=False without not_found_in_plex (no spurious retry)."""
+    from plexapi.exceptions import PlexApiException
+
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="http://example.com/img.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_plex_col = MagicMock()
+    mock_plex_col.uploadPoster.side_effect = PlexApiException("upload failed")
+    mock_section = MagicMock()
+    mock_section.collection.return_value = mock_plex_col
+
+    mock_server = MagicMock()
+    mock_server.library.sections.return_value = [mock_section]
+    mock_section.agent = "tv.plex.agents.custom.yamp"
+
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is False
+    assert "not_found_in_plex" not in result
+    assert "Poster upload failed" in result["error"]
+
+
+async def test_artwork_bg_retry_success_is_logged(monkeypatch, caplog):
+    """Retry succeeds → 'succeeded after retry' is logged at INFO level."""
+    import logging
+
+    col = MagicMock()
+    col.name = "Test"
+    results = [
+        {"ok": False, "not_found_in_plex": True, "error": "not found"},
+        {"ok": True, "created": True},
+    ]
+    call_count = [0]
+
+    def _sync(_col):
+        r = results[call_count[0]]
+        call_count[0] += 1
+        return r
+
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork", _sync)
+    with patch("app.asyncio.sleep", new_callable=AsyncMock), caplog.at_level(logging.INFO):
+        await yamp_app._sync_collection_artwork_bg(col)
+
+    assert call_count[0] == 2
+    assert any("succeeded after retry" in r.message.lower() for r in caplog.records)
+
+
+def test_build_index_read_errors_are_aggregated(tmp_path, caplog):
+    """Unreadable .info.json files without bracket IDs increment the error count and emit an ERROR."""
+    import logging
+
+    from app import build_index
+
+    # File with no bracket ID and invalid JSON — forces the fallback read path to fail
+    bad_file = tmp_path / "no_bracket_id.info.json"
+    bad_file.write_text("not valid json {{{", encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR):
+        index, _ = build_index(str(tmp_path))
+
+    assert len(index) == 0
+    assert any("failed to read" in r.message.lower() for r in caplog.records)
 
 
 # ── POST /api/index/rebuild ───────────────────────────────────────────────────
@@ -1087,3 +1480,205 @@ async def test_get_images_no_thumbnail_at_all(patched_app):
     images = resp.json()["MediaContainer"]["Image"]
     assert len(images) == 1
     assert images[0]["url"] == f"http://test/api/thumbnail/{info['id']}"
+
+
+# ── POST /api/thumbnails/fix ──────────────────────────────────────────────────
+
+
+async def test_api_fix_thumbnails_no_plex_config(patched_app, monkeypatch):
+    """PLEX_URL/PLEX_TOKEN not set → HTTP 400."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/thumbnails/fix")
+    assert resp.status_code == 400
+    assert "PLEX_URL and PLEX_TOKEN" in resp.json()["detail"]
+
+
+async def test_api_fix_thumbnails_plex_connection_failure(patched_app, monkeypatch):
+    """PlexServer() raises PlexApiException → HTTP 502 with error detail."""
+    from plexapi.exceptions import PlexApiException
+
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    with patch("plexapi.server.PlexServer", side_effect=PlexApiException("refused")):
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/thumbnails/fix")
+    assert resp.status_code == 502
+    assert "Plex connection failed" in resp.json()["detail"]
+
+
+async def test_api_fix_thumbnails_section_listing_failure(patched_app, monkeypatch):
+    """plex.library.sections() raises → HTTP 502 with error detail."""
+    from plexapi.exceptions import PlexApiException
+
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_plex = MagicMock()
+    mock_plex.library.sections.side_effect = PlexApiException("network error")
+    with patch("plexapi.server.PlexServer", return_value=mock_plex):
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/thumbnails/fix")
+    assert resp.status_code == 502
+    assert "Could not list sections" in resp.json()["detail"]
+
+
+async def test_api_fix_thumbnails_happy_path(patched_app, monkeypatch):
+    """Items present with local thumbnail → 200 with fixed >= 1, failed = 0."""
+    _, info, _ = patched_app
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_item = MagicMock()
+    mock_item.guid = f"{yamp_app.IDENTIFIER}://movie/{info['id']}"
+    mock_section = MagicMock()
+    mock_section.agent = yamp_app.IDENTIFIER
+    mock_section.all.return_value = [mock_item]
+    mock_plex = MagicMock()
+    mock_plex.library.sections.return_value = [mock_section]
+    with patch("plexapi.server.PlexServer", return_value=mock_plex):
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/thumbnails/fix")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["fixed"] >= 1
+    assert data["failed"] == 0
+    assert "skipped" in data
+
+
+async def test_api_fix_thumbnails_skips_items_without_content(patched_app, monkeypatch):
+    """Items with no local thumbnail and no YouTube URL in cache → counted as skipped."""
+    _, info, _ = patched_app
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    monkeypatch.setattr(yamp_app, "_video_meta_cache", {})
+    mock_item = MagicMock()
+    mock_item.guid = f"{yamp_app.IDENTIFIER}://movie/{info['id']}"
+    mock_section = MagicMock()
+    mock_section.agent = yamp_app.IDENTIFIER
+    mock_section.all.return_value = [mock_item]
+    mock_plex = MagicMock()
+    mock_plex.library.sections.return_value = [mock_section]
+    with (
+        patch("app._has_local_thumbnail", return_value=False),
+        patch("plexapi.server.PlexServer", return_value=mock_plex),
+    ):
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/thumbnails/fix")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["fixed"] == 0
+    assert data["skipped"] >= 1
+
+
+async def test_api_fix_thumbnails_upload_failure(patched_app, monkeypatch):
+    """uploadPoster raises PlexApiException → item counted in failed, not fixed."""
+    from plexapi.exceptions import PlexApiException
+
+    _, info, _ = patched_app
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_item = MagicMock()
+    mock_item.guid = f"{yamp_app.IDENTIFIER}://movie/{info['id']}"
+    mock_item.uploadPoster.side_effect = PlexApiException("upload failed")
+    mock_section = MagicMock()
+    mock_section.agent = yamp_app.IDENTIFIER
+    mock_section.all.return_value = [mock_item]
+    mock_plex = MagicMock()
+    mock_plex.library.sections.return_value = [mock_section]
+    with patch("plexapi.server.PlexServer", return_value=mock_plex):
+        async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/thumbnails/fix")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["failed"] >= 1
+    assert data["fixed"] == 0
+
+
+# ── _do_rescan error paths ────────────────────────────────────────────────────
+
+
+async def test_api_rescan_per_section_http_status_error(monkeypatch):
+    """Per-section HTTPStatusError → failed_sections entry contains HTTP status code."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    sections = [{"key": "1", "agent": yamp_app.IDENTIFIER, "title": "YouTube Movies"}]
+    mock_response = MagicMock()
+    mock_response.status_code = 403
+    error = httpx.HTTPStatusError("403 Forbidden", request=MagicMock(), response=mock_response)
+    mock_client = _make_rescan_mock(sections, refresh_side_effect=error)
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post("/api/rescan")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["triggered_sections"] == []
+    failed = data["failed_sections"]
+    assert len(failed) == 1
+    assert failed[0]["id"] == "1"
+    assert "HTTP" in failed[0]["error"] and "403" in failed[0]["error"]
+
+
+async def test_api_rescan_per_section_request_error(monkeypatch):
+    """Per-section RequestError → section appears in failed_sections with error string."""
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    sections = [{"key": "2", "agent": yamp_app.IDENTIFIER, "title": "YT Lib"}]
+    error = httpx.RequestError("connection reset")
+    mock_client = _make_rescan_mock(sections, refresh_side_effect=error)
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post("/api/rescan")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["triggered_sections"] == []
+    failed = data["failed_sections"]
+    assert len(failed) == 1
+    assert failed[0]["id"] == "2"
+    assert "connection reset" in failed[0]["error"]
+
+
+# ── _sync_collection_artwork error paths ──────────────────────────────────────
+
+
+def test_sync_collection_artwork_create_collection_fails(monkeypatch):
+    """collection not found in Plex, items found, but createCollection raises → ok=False."""
+    from plexapi.exceptions import NotFound, PlexApiException
+
+    from app import CollectionModel, _sync_collection_artwork
+
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    col = CollectionModel(name="Test Col", image="https://example.com/img.jpg", rules=[])
+    mock_section = MagicMock()
+    mock_section.agent = yamp_app.IDENTIFIER
+    mock_section.collection.side_effect = NotFound("not found")
+    mock_plex = MagicMock()
+    mock_plex.library.sections.return_value = [mock_section]
+    mock_plex.createCollection.side_effect = PlexApiException("permission denied")
+    with (
+        patch("app._find_matching_plex_items", return_value=[MagicMock()]),
+        patch("plexapi.server.PlexServer", return_value=mock_plex),
+    ):
+        result = _sync_collection_artwork(col)
+    assert result["ok"] is False
+    assert "Could not create collection" in result["error"]
+
+
+# ── build_index UnicodeDecodeError ────────────────────────────────────────────
+
+
+def test_build_index_unicode_decode_error(tmp_path):
+    """info.json with non-UTF-8 bytes and no bracket ID is counted as a read error, not raised."""
+    from app import build_index
+
+    valid_id = "validID1234"
+    (tmp_path / f"Video [{valid_id}].info.json").write_text(
+        json.dumps({"id": valid_id, "title": "Valid"}), encoding="utf-8"
+    )
+    # No bracket ID in filename, non-UTF-8 bytes → triggers fallback read path → UnicodeDecodeError
+    (tmp_path / "BadVideo.info.json").write_bytes(b"\xff\xfe invalid utf-8")
+
+    index, stem_index = build_index(str(tmp_path))
+
+    assert valid_id in index
+    assert len(index) == 1  # bad file was silently skipped, not raised

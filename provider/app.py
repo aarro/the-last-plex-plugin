@@ -9,15 +9,18 @@ import logging
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, unquote
 
 import httpx
+import requests.exceptions
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from plexapi.exceptions import PlexApiException
 from pydantic import BaseModel, field_validator
 
 from collection_map import (
@@ -41,6 +44,11 @@ from metadata import (
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s — %(message)s")
 logger = logging.getLogger(__name__)
+
+# Single source of truth for Plex-related exception types caught throughout this module.
+# PlexApiException covers plexapi errors; RequestException covers network/HTTP errors;
+# ET.ParseError covers malformed XML responses from Plex.
+_PLEX_ERRS = (PlexApiException, requests.exceptions.RequestException, ET.ParseError)
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -80,6 +88,7 @@ def build_index(data_path: str) -> tuple[dict[str, str], dict[str, str]]:
     """
     index: dict[str, str] = {}
     stem_index: dict[str, str] = {}
+    read_errors = 0
 
     def onerror(err: OSError) -> None:
         logger.warning("Index walk error at '%s' (errno %d) — skipping: %s", err.filename, err.errno, err)
@@ -99,14 +108,21 @@ def build_index(data_path: str) -> tuple[dict[str, str], dict[str, str]]:
                     with open(os.path.join(root, f), encoding="utf-8") as fh:
                         raw_id = json.load(fh).get("id", "")
                     video_id = raw_id if raw_id and _VALID_ID_RE.match(raw_id) else None
-                except (OSError, json.JSONDecodeError):
-                    pass
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+                    logger.warning("build_index: could not read '%s': %s", os.path.join(root, f), e)
+                    read_errors += 1
             if not video_id:
                 continue
             path = os.path.join(root, f)
             index[video_id] = path
             stem_index[f.removesuffix(".info.json")] = video_id
 
+    if read_errors:
+        logger.error(
+            "build_index: failed to read %d .info.json file(s) — check permissions under %s",
+            read_errors,
+            data_path,
+        )
     if not index:
         logger.warning("Index is empty — no .info.json files found under %s", data_path)
     else:
@@ -126,7 +142,7 @@ def build_meta_cache(video_index: dict[str, str]) -> dict[str, dict]:
             with open(path, encoding="utf-8") as f:
                 info = json.load(f)
             cache[video_id] = {k: info[k] for k in MATCH_FIELDS if k in info}
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("build_meta_cache: skipping %s: %s", video_id, e)
     logger.info("build_meta_cache: cached %d videos", len(cache))
     return cache
@@ -151,7 +167,7 @@ def _try_index_from_filename(video_id: str, media_path: str) -> bool:
             with open(candidate, encoding="utf-8") as f:
                 info = json.load(f)
             _video_meta_cache[video_id] = {k: info[k] for k in MATCH_FIELDS if k in info}
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("_try_index_from_filename: could not cache meta for %s: %s", video_id, e)
         return True
     return False
@@ -399,7 +415,7 @@ async def get_images(rating_key: str, request: Request):
     # Always proxy through YAMP — derive our own URL from the incoming request so
     # YAMP_URL doesn't need to be set.  Plex already knows this URL (it's how it
     # called us), so we just reflect it back.
-    base = (YAMP_URL or str(request.base_url).rstrip("/"))
+    base = YAMP_URL or str(request.base_url).rstrip("/")
     images.append({"type": "coverPoster", "url": f"{base}/api/thumbnail/{video_id}"})
 
     return JSONResponse(
@@ -505,8 +521,8 @@ async def api_get_collections():
     if PLEX_URL and PLEX_TOKEN:
         try:
             plex_thumbs = await asyncio.to_thread(_fetch_plex_collection_thumbs)
-        except Exception as e:
-            logger.error("api_get_collections: unexpected error fetching Plex thumbs: %s", e)
+        except _PLEX_ERRS:
+            logger.exception("api_get_collections: unexpected error fetching Plex thumbs")
             plex_thumb_error = True
 
     collections = [{**col, "plex_thumb": plex_thumbs.get(col.get("name"))} for col in data.get("collections", [])]
@@ -565,16 +581,21 @@ async def api_put_collections(body: CollectionsBody, background_tasks: Backgroun
             "skipped": 0,
         }
 
-    # Schedule artwork sync for collections that changed (rules or image)
+    # Kick off the Plex rescan before artwork sync so the scan is at least in-flight.
+    # Only triggered when rules changed — image-only saves don't create new collections
+    # so a rescan would be wasteful. _sync_collection_artwork_bg has its own retry.
+    plex_tasks_queued = False
     if PLEX_URL and PLEX_TOKEN:
+        if has_rule_changes:
+            background_tasks.add_task(_do_rescan_bg)
+            plex_tasks_queued = True
         old_images = {c["name"]: c.get("image") for c in old_cols}
         for col in body.collections:
             if col.image and (col.name in rules_changed or old_images.get(col.name) != col.image):
                 background_tasks.add_task(_sync_collection_artwork_bg, col)
-        background_tasks.add_task(_do_rescan_bg)
+                plex_tasks_queued = True
 
-    plex_sync = bool(PLEX_URL and PLEX_TOKEN)
-    return {"ok": True, **stats, "plex_sync": plex_sync}
+    return {"ok": True, **stats, "plex_sync": plex_tasks_queued}
 
 
 def _build_video_list(video_index: dict[str, str], collections: list[dict]) -> tuple[list[dict], list[str]]:
@@ -742,18 +763,16 @@ def _fetch_plex_collection_thumbs() -> dict[str, str]:
     Paths are relative (e.g. /api/plex-collection-thumb?path=…) so the Plex token
     is never sent to the browser.
     """
-    import requests.exceptions
-    from plexapi.exceptions import PlexApiException
     from plexapi.server import PlexServer
 
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
-    except (PlexApiException, requests.exceptions.RequestException) as e:
+    except _PLEX_ERRS as e:
         logger.error("_fetch_plex_collection_thumbs: failed to connect to Plex at '%s': %s", PLEX_URL, e)
         return {}
     try:
         sections = plex.library.sections()
-    except (PlexApiException, requests.exceptions.RequestException) as e:
+    except _PLEX_ERRS as e:
         logger.error("_fetch_plex_collection_thumbs: failed to fetch sections from Plex: %s", e)
         return {}
     thumbs: dict[str, str] = {}
@@ -764,7 +783,7 @@ def _fetch_plex_collection_thumbs() -> dict[str, str]:
             for col in section.collections():
                 if col.thumb:
                     thumbs[col.title] = f"/api/plex-collection-thumb?path={quote(col.thumb)}"
-        except (PlexApiException, requests.exceptions.RequestException) as e:
+        except _PLEX_ERRS as e:
             logger.error(
                 "_fetch_plex_collection_thumbs: error fetching collections for section '%s': %s",
                 section.title,
@@ -782,12 +801,16 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
         return {"ok": False, "created": False, "error": "no image set"}
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
-    except Exception as e:
+    except _PLEX_ERRS as e:
         logger.error("_sync_collection_artwork: Plex connection failed: %s", e)
         return {"ok": False, "created": False, "error": f"Plex connection failed: {e}"}
 
     col_spec = [{"name": col.name, "rules": [r.model_dump() for r in col.rules]}]
-    yamp_sections = [s for s in plex.library.sections() if s.agent == IDENTIFIER]
+    try:
+        yamp_sections = [s for s in plex.library.sections() if s.agent == IDENTIFIER]
+    except _PLEX_ERRS as e:
+        logger.error("_sync_collection_artwork: failed to list Plex sections: %s", e)
+        return {"ok": False, "created": False, "error": f"Could not list Plex sections: {e}"}
     if not yamp_sections:
         return {"ok": False, "created": False, "error": "No YAMP-managed sections found in Plex"}
 
@@ -798,24 +821,32 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
         except NotFound:
             items = _find_matching_plex_items(section, col_spec)
             if not items:
-                return {"ok": False, "created": False, "error": f"'{col.name}' not in Plex and no matched videos found"}
+                return {
+                    "ok": False,
+                    "created": False,
+                    "not_found_in_plex": True,
+                    "error": f"'{col.name}' not in Plex and no matched videos found",
+                }
             try:
                 plex_col = plex.createCollection(title=col.name, section=section, items=items)
                 created = True
-            except Exception as e:
+            except _PLEX_ERRS as e:
                 logger.error("_sync_collection_artwork: createCollection failed for '%s': %s", col.name, e)
                 return {"ok": False, "created": False, "error": f"Could not create collection: {e}"}
+        except _PLEX_ERRS as e:
+            logger.error("_sync_collection_artwork: collection lookup failed for '%s': %s", col.name, e)
+            return {"ok": False, "created": False, "error": f"Collection lookup failed: {e}"}
 
         try:
             plex_col.uploadPoster(url=col.image)
-        except Exception as e:
+        except _PLEX_ERRS as e:
             logger.error("_sync_collection_artwork: uploadPoster failed for '%s': %s", col.name, e)
             return {"ok": False, "created": created, "error": f"Poster upload failed: {e}"}
 
         logger.info("_sync_collection_artwork: '%s' — ok (created=%s)", col.name, created)
         return {"ok": True, "created": created, "error": None}
 
-    return {"ok": False, "created": False, "error": "No YAMP sections processed"}
+    raise RuntimeError("_sync_collection_artwork: unexpectedly fell through section loop")
 
 
 _PLEX_THUMB_PATH_RE = re.compile(r"^/library/(collections|metadata)/\d+/(thumb|composite)(/\d+(\?[a-zA-Z0-9=&]+)?)?$")
@@ -878,16 +909,16 @@ async def _do_rescan() -> dict:
                         params={"force": 1},
                     )
                     resp.raise_for_status()
-                    triggered.append(section_id)
+                    triggered.append({"id": section_id, "title": section.get("title", f"Section {section_id}")})
                 except httpx.TimeoutException:
                     logger.error("Timed out refreshing section %s", section_id)
-                    failed.append({"section_id": section_id, "error": "timeout"})
+                    failed.append({"id": section_id, "error": "timeout"})
                 except httpx.HTTPStatusError as e:
                     logger.error("Failed to refresh section %s: HTTP %s", section_id, e.response.status_code)
-                    failed.append({"section_id": section_id, "error": f"HTTP {e.response.status_code}"})
+                    failed.append({"id": section_id, "error": f"HTTP {e.response.status_code}"})
                 except httpx.RequestError as e:
                     logger.error("Network error refreshing section %s: %s", section_id, e)
-                    failed.append({"section_id": section_id, "error": str(e)})
+                    failed.append({"id": section_id, "error": str(e)})
 
     return {"triggered_sections": triggered, "failed_sections": failed}
 
@@ -898,6 +929,8 @@ async def _do_rescan_bg() -> None:
         result = await _do_rescan()
         if result.get("failed_sections"):
             logger.error("Background rescan: failed sections: %s", result["failed_sections"])
+    except HTTPException as e:
+        logger.error("Background rescan: Plex error (HTTP %d): %s", e.status_code, e.detail)
     except Exception:
         logger.exception("Background rescan raised an unhandled exception")
 
@@ -910,12 +943,46 @@ async def api_rescan():
     return await _do_rescan()
 
 
+# Artwork retry delay in seconds. Long enough for Plex to finish scanning a typical
+# library after a refresh request. Increase if artwork sync still fails on very large
+# libraries.
+_ARTWORK_RETRY_DELAY = 30
+
+
 async def _sync_collection_artwork_bg(col) -> None:
-    """Background wrapper: sync artwork for one collection and log any errors."""
+    """Background wrapper: sync artwork for one collection and log any errors.
+
+    If the collection is not yet visible in Plex (e.g. the rescan triggered in the same
+    request is still in progress), waits _ARTWORK_RETRY_DELAY seconds and retries once.
+    Other error conditions are logged immediately without retrying.
+    """
     try:
         result = await asyncio.to_thread(_sync_collection_artwork, col)
         if not result.get("ok"):
-            logger.error("Background artwork sync failed for '%s': %s", col.name, result.get("error"))
+            if result.get("not_found_in_plex"):
+                logger.info(
+                    "Artwork sync for '%s' deferred — Plex rescan may still be in progress. Retrying in %ds.",
+                    col.name,
+                    _ARTWORK_RETRY_DELAY,
+                )
+                await asyncio.sleep(_ARTWORK_RETRY_DELAY)
+                result = await asyncio.to_thread(_sync_collection_artwork, col)
+                if not result.get("ok"):
+                    if result.get("not_found_in_plex"):
+                        logger.error(
+                            "Artwork sync for '%s' still not found in Plex after retry — "
+                            "rescan may not have completed in time. Consider increasing _ARTWORK_RETRY_DELAY.",
+                            col.name,
+                        )
+                    else:
+                        logger.error("Artwork sync retry failed for '%s': %s", col.name, result.get("error"))
+                else:
+                    logger.info("Artwork sync for '%s' succeeded after retry.", col.name)
+            else:
+                logger.error("Background artwork sync failed for '%s': %s", col.name, result.get("error"))
+    except asyncio.CancelledError:
+        logger.warning("Background artwork sync for '%s' was cancelled (server shutting down?)", col.name)
+        raise
     except Exception:
         logger.exception("Background artwork sync raised an unhandled exception for '%s'", col.name)
 
@@ -932,20 +999,18 @@ def _fix_all_thumbnails(
     meta_cache and video_index are passed in by the caller before thread dispatch to
     avoid reading globals that may be replaced concurrently.
     """
-    import requests.exceptions
-    from plexapi.exceptions import PlexApiException
     from plexapi.server import PlexServer
 
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
-    except (PlexApiException, requests.exceptions.RequestException) as e:
+    except _PLEX_ERRS as e:
         logger.error("_fix_all_thumbnails: Plex connection failed: %s", e)
         return {"fixed": 0, "failed": 0, "skipped": 0, "error": f"Plex connection failed: {e}"}
 
     fixed = failed = skipped = 0
     try:
         sections = plex.library.sections()
-    except (PlexApiException, requests.exceptions.RequestException) as e:
+    except _PLEX_ERRS as e:
         logger.error("_fix_all_thumbnails: failed to fetch sections: %s", e)
         return {"fixed": 0, "failed": 0, "skipped": 0, "error": f"Could not list sections: {e}"}
 
@@ -954,7 +1019,7 @@ def _fix_all_thumbnails(
             continue
         try:
             items = section.all()
-        except (PlexApiException, requests.exceptions.RequestException) as e:
+        except _PLEX_ERRS as e:
             logger.error("_fix_all_thumbnails: failed to list items in section '%s': %s", section.title, e)
             failed += 1
             continue
@@ -983,7 +1048,7 @@ def _fix_all_thumbnails(
             try:
                 item.uploadPoster(url=thumb_url)
                 fixed += 1
-            except (PlexApiException, requests.exceptions.RequestException) as e:
+            except _PLEX_ERRS as e:
                 logger.error("_fix_all_thumbnails: uploadPoster failed for %r: %s", video_id, e)
                 failed += 1
 

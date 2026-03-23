@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const FIELDS = ["tags", "title", "channel", "uploader", "categories", "description", "extractor"];
 const MATCHES = ["exact", "in"];
@@ -107,8 +107,18 @@ function isAbsoluteUrl(url) {
   return typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"));
 }
 
-function CollectionCard({ collection, videos, onChange, onDelete, otherNames, plexThumb, onVideoSearch }) {
-  const [expanded, setExpanded] = useState(false);
+function CollectionCard({
+  collection,
+  videos,
+  onChange,
+  onDelete,
+  otherNames,
+  plexThumb,
+  onVideoSearch,
+  initialExpanded,
+  onImageSave,
+}) {
+  const [expanded, setExpanded] = useState(!!initialExpanded);
   const [editName, setEditName] = useState(collection.name);
   const [nameError, setNameError] = useState(null);
   const [imageEditing, setImageEditing] = useState(false);
@@ -156,16 +166,29 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
     onChange({ ...collection, name: trimmed });
   };
 
-  const saveImage = () => {
+  const saveImage = async () => {
     const url = editImageUrl.trim();
-    onChange({ ...collection, image: isAbsoluteUrl(url) ? url : null });
-    setImageEditing(false);
+    const updated = { ...collection, image: isAbsoluteUrl(url) ? url : null };
+    if (onImageSave) {
+      const ok = await onImageSave(updated);
+      if (ok) setImageEditing(false);
+      // on failure: error shown in action bar; editor stays open
+    } else {
+      onChange(updated);
+      setImageEditing(false);
+    }
   };
 
-  const clearImage = () => {
+  const clearImage = async () => {
     setEditImageUrl("");
-    onChange({ ...collection, image: null });
-    setImageEditing(false);
+    const updated = { ...collection, image: null };
+    if (onImageSave) {
+      const ok = await onImageSave(updated);
+      if (ok) setImageEditing(false);
+    } else {
+      onChange(updated);
+      setImageEditing(false);
+    }
   };
 
   const toggleExpanded = () => {
@@ -190,7 +213,7 @@ function CollectionCard({ collection, videos, onChange, onDelete, otherNames, pl
   };
 
   return (
-    <div className={`card${expanded ? " card--expanded" : ""}`}>
+    <div className={`card${expanded ? " card--expanded" : ""}`} data-collection-name={collection.name}>
       {/* Left column: poster/thumbnail — toggles expand when collapsed, image editor when expanded */}
       {/* biome-ignore lint/a11y/useSemanticElements: poster is interactive in two different modes depending on expanded state */}
       <div
@@ -357,8 +380,17 @@ function AddCollectionForm({ onAdd, onCancel, existingNames }) {
   );
 }
 
-export default function Collections({ collections, videos, onChange, onVideoSearch }) {
+export default function Collections({ collections, videos, onChange, onVideoSearch, onImageSave }) {
   const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState(null);
+  const sectionRef = useRef(null);
+
+  useEffect(() => {
+    if (!newName || !sectionRef.current) return;
+    const el = sectionRef.current.querySelector(`[data-collection-name="${CSS.escape(newName)}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setNewName(null);
+  }, [newName]);
 
   const updateAt = (i, c) => {
     const next = [...collections];
@@ -371,12 +403,13 @@ export default function Collections({ collections, videos, onChange, onVideoSear
   const addCollection = (c) => {
     onChange([...collections, c]);
     setAdding(false);
+    setNewName(c.name);
   };
 
   const sorted = collections.map((c, i) => ({ c, i })).sort((a, b) => a.c.name.localeCompare(b.c.name));
 
   return (
-    <section>
+    <section ref={sectionRef}>
       <h2>Collections</h2>
       <p className="collections-intro">
         Collections group videos from multiple channels, tags, or titles under one name in Plex — great when an artist,
@@ -397,6 +430,16 @@ export default function Collections({ collections, videos, onChange, onVideoSear
           otherNames={collections.filter((_, idx) => idx !== i).map((x) => x.name)}
           plexThumb={c.plex_thumb}
           onVideoSearch={onVideoSearch}
+          initialExpanded={c.name === newName}
+          onImageSave={
+            onImageSave && videos.some((v) => v.collections.includes(c.name))
+              ? (updated) => {
+                  const next = [...collections];
+                  next[i] = updated;
+                  return onImageSave(next);
+                }
+              : undefined
+          }
         />
       ))}
 

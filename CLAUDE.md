@@ -107,8 +107,8 @@ Each collection can have an optional `image` URL. On `PUT /api/collections`, YAM
 
 1. Saves the new collection list to disk immediately
 2. Runs collection matching (skipped entirely if only image/name changed — rules must differ)
-3. Schedules artwork sync and Plex rescan as **background tasks** (non-blocking)
-4. Returns immediately with match counts and a `plex_sync: true` flag
+3. When rules changed: schedules a **Plex rescan first**, then **artwork sync** as background tasks (non-blocking). Image-only saves skip the rescan — no new collections to discover.
+4. Returns immediately with match counts and a `plex_sync: true` flag (only set when background tasks were actually queued, not just when credentials are present)
 
 The artwork sync itself:
 1. Connects to Plex via `plexapi` (`PLEX_URL` + `PLEX_TOKEN`)
@@ -116,7 +116,9 @@ The artwork sync itself:
 3. Finds the existing Plex collection by name, or creates it by matching YAMP-tracked videos against the collection rules
 4. Calls `plex_col.uploadPoster(url=image)` to set the poster
 
-Artwork is only synced for collections where rules or the image URL actually changed (not all collections with images on every save). Sync failures are logged server-side.
+If the collection isn't found in Plex on the first attempt (e.g. rescan hasn't completed yet), `_sync_collection_artwork_bg` retries once after `_ARTWORK_RETRY_DELAY` seconds (default: 30). Sync failures are logged server-side.
+
+Artwork is only synced for collections where rules or the image URL actually changed (not all collections with images on every save).
 
 The 📷 button in the UI is only shown when a collection has matched videos — this ensures the create-collection path always has items to work with.
 
@@ -196,7 +198,7 @@ Edit `docker-compose.yml`: set the `device` path under `volumes.youtube-data` an
 - `Makefile` — common dev tasks (test, build, dev, docker-*)
 - `provider/collection_map.py` — `MATCH_FIELDS`, `diff_collections()`, `match_video()`, `resolve_collections()`, `recompute_all_collections()`, `find_collection_map()`
 - `provider/metadata.py` — `extract_video_id()` (YouTube/Bilibili/generic regex), `build_metadata_response()`
-- `provider/app.py` — all FastAPI routes; `build_index()` (with info.json ID fallback), `build_meta_cache()`, `_video_id_from_plex_item()`, `_has_local_thumbnail()`, `_do_rescan()`, `_sync_collection_artwork()`, `_sync_collection_artwork_bg()`, `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, `_fix_all_thumbnails()`, `_try_index_from_filename()`, thumbnail proxy + Plex collection thumb proxy
+- `provider/app.py` — all FastAPI routes; `build_index()` (with info.json ID fallback), `build_meta_cache()`, `_video_id_from_plex_item()`, `_has_local_thumbnail()`, `_do_rescan()`, `_do_rescan_bg()`, `_sync_collection_artwork()`, `_sync_collection_artwork_bg()` (with retry), `_find_matching_plex_items()`, `_fetch_plex_collection_thumbs()`, `_fix_all_thumbnails()`, `_try_index_from_filename()`, thumbnail proxy + Plex collection thumb proxy; `_PLEX_ERRS` tuple (module-level catch-all for Plex/network/XML errors)
 - `provider/ui/src/App.jsx` — React root, state management, save/rescan/fix-thumbnails actions
 - `provider/ui/src/Collections.jsx` — collection editor (rules, name, poster image); plex_thumb shown as display-only preview
 - `provider/ui/src/DiscoverPanel.jsx` — video browser; click any tag to create a collection from it

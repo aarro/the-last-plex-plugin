@@ -8,7 +8,7 @@ async function fetchJson(url, options) {
   try {
     return await res.json();
   } catch {
-    throw new Error("Server returned invalid response");
+    throw new Error(`Server returned invalid JSON (HTTP ${res.status} from ${res.url})`);
   }
 }
 
@@ -22,20 +22,22 @@ export default function App() {
   const [rescanning, setRescanning] = useState(false);
   const [fixingThumbs, setFixingThumbs] = useState(false);
   const [search, setSearch] = useState("");
+  const [loadError, setLoadError] = useState(null);
 
   const load = useCallback(async () => {
-    const [colRes, vidRes] = await Promise.all([fetch("/api/collections"), fetch("/api/videos")]);
-    setData(await colRes.json());
-    setVideos((await vidRes.json()).videos ?? []);
+    const [colData, vidData] = await Promise.all([fetchJson("/api/collections"), fetchJson("/api/videos")]);
+    if (!Array.isArray(colData?.collections)) throw new Error("Unexpected response from /api/collections");
+    if (!Array.isArray(vidData?.videos)) throw new Error("Unexpected response from /api/videos");
+    setData(colData);
+    setVideos(vidData.videos);
     setDirty(false);
   }, []);
 
   useEffect(() => {
-    load();
-    fetch("/api/version")
-      .then((r) => r.json())
-      .then((j) => setVersion(j.version))
-      .catch(() => {});
+    load().catch((e) => setLoadError(e.message));
+    fetchJson("/api/version")
+      .then((d) => setVersion(d.version))
+      .catch((e) => console.warn("Failed to fetch version:", e));
   }, [load]);
 
   const setCollections = (collections) => {
@@ -43,24 +45,35 @@ export default function App() {
     setDirty(true);
   };
 
-  const save = async () => {
+  const saveWithCollections = async (collections, makeMsg) => {
     setSaving(true);
     setStatus(null);
     try {
       const result = await fetchJson("/api/collections", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ collections: data.collections }),
+        body: JSON.stringify({ collections }),
       });
-      const counts = `${result.matched} matched, ${result.unmatched} unmatched`;
       const plexNote = result.plex_sync ? " Plex syncing in background." : "";
-      setStatus({ type: "ok", msg: `Saved — ${counts}.${plexNote}` });
-      await load();
+      setStatus({ type: "ok", msg: `${makeMsg(result)}${plexNote}` });
+      try {
+        await load();
+      } catch (e) {
+        console.error("Post-save reload failed:", e);
+        setStatus({ type: "err", msg: `Saved, but failed to refresh (${e.message}) — please reload the page.` });
+        return false;
+      }
+      return true;
     } catch (e) {
       setStatus({ type: "err", msg: `Save failed: ${e.message}` });
+      return false;
     } finally {
       setSaving(false);
     }
+  };
+
+  const save = async () => {
+    await saveWithCollections(data.collections, (r) => `Saved — ${r.matched} matched, ${r.unmatched} unmatched`);
   };
 
   const rescan = async () => {
@@ -68,9 +81,23 @@ export default function App() {
     setStatus(null);
     try {
       const json = await fetchJson("/api/rescan", { method: "POST" });
-      const n = json.triggered_sections?.length ?? 0;
-      if (n > 0) {
-        setStatus({ type: "ok", msg: "Plex rescan triggered." });
+      const triggered = json.triggered_sections ?? [];
+      const failed = json.failed_sections ?? [];
+      const sectionLabel = (s) => {
+        const label = s.title ?? s.id ?? null;
+        if (!label) console.warn("Unexpected rescan section shape — no title or id:", s);
+        return label ?? "unknown";
+      };
+      if (triggered.length > 0 && failed.length === 0) {
+        const names = triggered.map(sectionLabel).join(", ");
+        setStatus({ type: "ok", msg: `Rescan triggered for "${names}"` });
+      } else if (triggered.length > 0) {
+        const names = triggered.map(sectionLabel).join(", ");
+        const failNames = failed.map(sectionLabel).join(", ");
+        setStatus({ type: "err", msg: `Rescan triggered for "${names}". Failed: ${failNames}` });
+      } else if (failed.length > 0) {
+        const failNames = failed.map(sectionLabel).join(", ");
+        setStatus({ type: "err", msg: `Rescan failed for all sections: ${failNames}` });
       } else {
         setStatus({ type: "err", msg: "Rescan failed — no YAMP-managed library found in Plex." });
       }
@@ -95,6 +122,14 @@ export default function App() {
     }
   };
 
+  if (loadError)
+    return (
+      <div className="app">
+        <p className="empty" style={{ color: "var(--danger)" }}>
+          Failed to load: {loadError}
+        </p>
+      </div>
+    );
   if (!data)
     return (
       <div className="app">
@@ -107,7 +142,6 @@ export default function App() {
       <header>
         <div className="header-brand">
           <img src="/logo.svg" alt="YAMP" height="40" className="header-logo" />
-          {version && <span className="header-version">{version}</span>}
         </div>
         <div className="stats">
           <div className="stat">
@@ -132,6 +166,7 @@ export default function App() {
             videos={videos}
             onChange={setCollections}
             onVideoSearch={setSearch}
+            onImageSave={(updatedCollections) => saveWithCollections(updatedCollections, () => "Image saved.")}
           />
         </div>
         <div className="col-right">
@@ -140,12 +175,19 @@ export default function App() {
       </div>
 
       <div className="action-bar">
+        {version && <span className="action-bar-version">{version}</span>}
         {status && <span className={`status ${status.type}`}>{status.msg}</span>}
         <button type="button" className="btn-ghost" onClick={fixThumbnails} disabled={fixingThumbs}>
           {fixingThumbs ? "Fixing…" : "Fix Thumbnails"}
         </button>
-        <button type="button" className="btn-ghost" onClick={rescan} disabled={rescanning}>
-          {rescanning ? "Rescanning…" : "Rescan Plex"}
+        <button
+          type="button"
+          className="btn-ghost"
+          onClick={rescan}
+          disabled={rescanning}
+          title="Ask Plex to re-fetch metadata for all videos in YAMP-managed libraries"
+        >
+          {rescanning ? "Scanning…" : "Trigger Plex Scan"}
         </button>
         <button type="button" className="btn-primary" onClick={save} disabled={!dirty || saving}>
           {saving ? "Saving…" : "Save Changes"}

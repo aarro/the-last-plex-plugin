@@ -4,10 +4,12 @@ A Plex Custom Metadata Provider for yt-dlp downloads.
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
 import re
+import shutil
 import time
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
@@ -24,7 +26,9 @@ from plexapi.exceptions import PlexApiException
 from pydantic import BaseModel, field_validator
 
 from collection_map import (
+    MAPPING_FILE_NAME,
     MATCH_FIELDS,
+    YAMP_DIR,
     diff_collections,
     find_collection_map,
     load_map,
@@ -62,10 +66,21 @@ except ImportError:
     _yt_dlp = None  # type: ignore[assignment]
     _YT_DLP_AVAILABLE = False
 
+# Optional dependency: Pillow is only needed for the image crop endpoint.
+try:
+    from PIL import Image as _PIL_Image
+
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_Image = None  # type: ignore[assignment]
+    _PIL_AVAILABLE = False
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 IDENTIFIER = "tv.plex.agents.custom.yamp"
 DATA_PATH = os.environ.get("YOUTUBE_DATA_PATH", "/data")
+_YAMP_DIR = os.path.join(DATA_PATH, YAMP_DIR)
+_ASSETS_DIR = os.path.join(_YAMP_DIR, "assets")
 PLEX_URL = os.environ.get("PLEX_URL", "").rstrip("/")
 PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
 YAMP_URL = os.environ.get("YAMP_URL", "").rstrip("/")
@@ -296,8 +311,18 @@ def _fetch_channel_art(uploader_url: str, data_path: str | None = None) -> dict 
             "avatar_url": avatar_url,
             "banner_url": banner_url,
         }
-    except Exception:
-        logger.exception("_fetch_channel_art: unexpected error for '%s'", uploader_url)
+    except Exception as exc:
+        # yt-dlp raises DownloadError / ExtractorError for expected failures
+        # (404, geo-block, deleted channel). Log as warning to avoid noisy tracebacks.
+        yt_errors: tuple[type[Exception], ...] = ()
+        if _YT_DLP_AVAILABLE and _yt_dlp is not None:
+            _dl = getattr(_yt_dlp.utils, "DownloadError", None)
+            _ex = getattr(_yt_dlp.utils, "ExtractorError", None)
+            yt_errors = tuple(e for e in (_dl, _ex) if e is not None and isinstance(e, type))
+        if yt_errors and isinstance(exc, yt_errors):
+            logger.warning("_fetch_channel_art: yt-dlp error for '%s': %s", uploader_url, exc)
+        else:
+            logger.exception("_fetch_channel_art: unexpected error for '%s'", uploader_url)
         return None
 
 
@@ -409,6 +434,7 @@ async def lifespan(app: FastAPI):
             DATA_PATH,
         )
         raise RuntimeError(f"YOUTUBE_DATA_PATH '{DATA_PATH}' is not a directory")
+    _migrate_yamp_dir()
     _video_index, _stem_index = build_index(DATA_PATH)
     _video_meta_cache = build_meta_cache(_video_index)
 
@@ -473,6 +499,46 @@ async def _get_info_json(video_id: str) -> dict:
 
 def _collection_map_path() -> str | None:
     return find_collection_map(DATA_PATH, DATA_PATH)
+
+
+def _slugify(name: str) -> str:
+    """Convert a collection name to a safe ASCII filename slug."""
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return slug or "unnamed"
+
+
+def _migrate_yamp_dir() -> None:
+    """One-time migration: move _collection_map.json → .yamp/collection_map.json.
+
+    No-op if .yamp/ already exists or there is nothing to migrate.
+    Creates .yamp/assets/ so the directory is always present after startup.
+    """
+    old_map = os.path.join(DATA_PATH, "_collection_map.json")
+    if os.path.exists(_YAMP_DIR):
+        # Already migrated or fresh setup — ensure assets subdir exists.
+        os.makedirs(_ASSETS_DIR, exist_ok=True)
+        return
+    os.makedirs(_ASSETS_DIR, exist_ok=True)
+    if not os.path.exists(old_map):
+        return
+    new_map = os.path.join(_YAMP_DIR, MAPPING_FILE_NAME)
+    try:
+        shutil.copy2(old_map, new_map)
+    except OSError as e:
+        logger.error("_migrate_yamp_dir: could not copy collection map: %s", e)
+        return
+    bak = old_map + ".bak"
+    try:
+        os.rename(old_map, bak)
+        logger.info("_migrate_yamp_dir: migrated _collection_map.json → .yamp/collection_map.json")
+    except OSError as e:
+        logger.warning(
+            "_migrate_yamp_dir: copy succeeded but could not rename old map to .bak (manual cleanup may be needed): %s",
+            e,
+        )
+
+
+_ASSETS_FILENAME_RE = re.compile(r"^[a-z0-9_-]{1,200}\.(jpg|jpeg|png|webp)$", re.IGNORECASE)
 
 
 def _require_api_key(request: Request) -> None:
@@ -1455,6 +1521,113 @@ async def api_rebuild_index():
     if not _video_index:
         logger.warning("Rebuilt index is empty — no videos found under %s", DATA_PATH)
     return {"indexed": len(_video_index)}
+
+
+# ── Asset management ─────────────────────────────────────────────────────────
+
+
+_AssetType = Literal["image", "art", "logo", "square_art"]
+
+
+class AssetSaveBody(BaseModel):
+    source_url: str
+    collection: str
+    type: _AssetType
+
+
+class AssetCropBody(BaseModel):
+    source_url: str
+    x: float
+    y: float
+    w: float
+    h: float
+    collection: str
+    type: _AssetType
+
+
+_MAX_IMAGE_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
+
+
+async def _download_image(url: str) -> bytes:
+    """Download an image URL and return its bytes. Raises HTTPException on failure."""
+    if not url.startswith(("https://", "http://")):
+        raise HTTPException(status_code=422, detail="Only http/https URLs are supported")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), follow_redirects=True) as client:
+            resp = await client.get(url)
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail="Image fetch timed out") from e
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail="Could not fetch image") from e
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Image source returned HTTP {resp.status_code}")
+    content_type = resp.headers.get("content-type", "")
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=422, detail=f"URL did not return an image (got {content_type!r})")
+    if len(resp.content) > _MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image file too large")
+    return resp.content
+
+
+@app.post("/api/assets/save", dependencies=[Depends(_require_api_key)])
+async def api_assets_save(body: AssetSaveBody, request: Request):
+    """Download a URL and save it as a hard file in .yamp/assets/."""
+    os.makedirs(_ASSETS_DIR, exist_ok=True)
+    data = await _download_image(body.source_url)
+    filename = f"{_slugify(body.collection)}_{body.type}.jpg"
+    dest = os.path.join(_ASSETS_DIR, filename)
+    try:
+        Path(dest).write_bytes(data)
+    except OSError as e:
+        logger.error("api_assets_save: could not write '%s': %s", dest, e)
+        raise HTTPException(status_code=500, detail="Could not save image") from e
+    base = YAMP_URL or str(request.base_url).rstrip("/")
+    return {"url": f"{base}/api/assets/{filename}"}
+
+
+@app.post("/api/assets/crop", dependencies=[Depends(_require_api_key)])
+async def api_assets_crop(body: AssetCropBody, request: Request):
+    """Download a URL, crop it to the specified region, and save to .yamp/assets/."""
+    if not _PIL_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Pillow is not installed — crop unavailable")
+    os.makedirs(_ASSETS_DIR, exist_ok=True)
+    data = await _download_image(body.source_url)
+    try:
+        img = _PIL_Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception as e:
+        logger.warning("api_assets_crop: could not decode image from '%s': %s", body.source_url, e)
+        raise HTTPException(status_code=422, detail="Could not decode image") from e
+    iw, ih = img.size
+    x0 = max(0, int(body.x * iw))
+    y0 = max(0, int(body.y * ih))
+    x1 = min(iw, int((body.x + body.w) * iw))
+    y1 = min(ih, int((body.y + body.h) * ih))
+    if x1 <= x0 or y1 <= y0:
+        raise HTTPException(status_code=422, detail="Crop region is empty")
+    filename = f"{_slugify(body.collection)}_{body.type}.jpg"
+    dest = os.path.join(_ASSETS_DIR, filename)
+    try:
+        cropped = img.crop((x0, y0, x1, y1))
+        cropped.save(dest, "JPEG", quality=92)
+    except OSError as e:
+        logger.error("api_assets_crop: could not write '%s': %s", dest, e)
+        raise HTTPException(status_code=500, detail="Could not save cropped image") from e
+    except Exception as e:
+        logger.error("api_assets_crop: unexpected error processing '%s': %s", body.source_url, e)
+        raise HTTPException(status_code=500, detail="Could not process image") from e
+    base = YAMP_URL or str(request.base_url).rstrip("/")
+    return {"url": f"{base}/api/assets/{filename}"}
+
+
+@app.get("/api/assets/{filename}")
+async def api_assets(filename: str):
+    """Serve a YAMP-managed asset image from .yamp/assets/."""
+    if not _ASSETS_FILENAME_RE.match(filename):
+        raise HTTPException(status_code=404)
+    path = os.path.join(_ASSETS_DIR, filename)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404)
+    return FileResponse(path, media_type="image/jpeg")
 
 
 # ── Static UI (served last so API routes take priority) ──────────────────────

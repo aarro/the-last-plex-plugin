@@ -13,7 +13,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MAPPING_FILE_NAME = "_collection_map.json"
+YAMP_DIR = ".yamp"
+MAPPING_FILE_NAME = "collection_map.json"
 
 # Fields read by the rule engine — used to populate the in-memory meta cache.
 # Includes "thumbnail" so the Fix Thumbnails fallback can use the cache too.
@@ -25,12 +26,12 @@ _MAP_LOCK = threading.Lock()
 
 
 def find_collection_map(start_dir: str, root: str | None = None) -> str | None:
-    """Walk up from start_dir to find _collection_map.json, stopping at root."""
+    """Walk up from start_dir to find .yamp/collection_map.json, stopping at root."""
     current = Path(start_dir).resolve()
     stop = Path(root).resolve() if root else Path(current.anchor)
 
     while True:
-        candidate = current / MAPPING_FILE_NAME
+        candidate = current / YAMP_DIR / MAPPING_FILE_NAME
         if candidate.exists():
             logger.info("Found mapping file at: %s", candidate)
             return str(candidate)
@@ -38,7 +39,7 @@ def find_collection_map(start_dir: str, root: str | None = None) -> str | None:
             break
         current = current.parent
 
-    logger.warning("Unable to find %s starting from %s", MAPPING_FILE_NAME, start_dir)
+    logger.warning("Unable to find %s/%s starting from %s", YAMP_DIR, MAPPING_FILE_NAME, start_dir)
     return None
 
 

@@ -546,6 +546,31 @@ select option {
 .url-modal-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+.url-modal-error {
+  font-size: 12px;
+  color: var(--danger, #e05555);
+  margin: 0;
+}
+
+/* Crop mode — wider modal to fit the image comfortably */
+.url-modal--crop {
+  min-width: min(680px, 95vw);
+  max-width: min(900px, 95vw);
+}
+.crop-container {
+  max-height: 65vh;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  background: var(--surface2);
+  border-radius: var(--radius);
+}
+.crop-source-img {
+  max-width: 100%;
+  max-height: 60vh;
+  display: block;
 }
 
 /* Square Art suggestions */

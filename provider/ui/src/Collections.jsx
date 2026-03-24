@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import ReactCrop, { centerCrop, makeAspectCrop } from "react-image-crop";
+import "react-image-crop/dist/ReactCrop.css";
 
 const FIELDS = ["tags", "title", "channel", "uploader", "categories", "description", "extractor"];
 const MATCHES = ["exact", "in"];
@@ -9,6 +11,9 @@ const IMAGE_TYPES = [
   { key: "logo", label: "Logo", hint: "PNG with transparency recommended" },
   { key: "square_art", label: "Square Art", hint: "1:1 square" },
 ];
+
+// Locked aspect ratios for the crop tool (undefined = free crop for logo)
+const CROP_ASPECTS = { image: 2 / 3, art: 16 / 9, logo: undefined, square_art: 1 };
 
 /** Prevents click/key events from bubbling to the parent card toggle. */
 const stopBubble = {
@@ -174,7 +179,13 @@ function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
   const [draft, setDraft] = useState(currentUrl || "");
   const [options, setOptions] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [cropMode, setCropMode] = useState(false);
+  const [crop, setCrop] = useState(null);
+  const [percentCrop, setPercentCrop] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
   const inputRef = useRef(null);
+  const aspect = CROP_ASPECTS[key];
 
   // For Square Art, fetch suggestions when the modal opens
   useEffect(() => {
@@ -188,21 +199,86 @@ function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
   }, [key, collectionName]);
 
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (!cropMode) inputRef.current?.focus();
+  }, [cropMode]);
 
   useEffect(() => {
     const handler = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        if (cropMode) setCropMode(false);
+        else onClose();
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, cropMode]);
 
-  const commit = () => {
-    onSet(isAbsoluteUrl(draft) ? draft : null);
-    onClose();
-  };
+  function onImageLoad(e) {
+    const { width, height } = e.currentTarget;
+    const initial =
+      aspect != null
+        ? centerCrop(makeAspectCrop({ unit: "%", width: 90 }, aspect, width, height), width, height)
+        : { unit: "%", x: 5, y: 5, width: 90, height: 90 };
+    setCrop(initial);
+    setPercentCrop(initial);
+  }
+
+  async function saveToAssets(url) {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const resp = await fetch("/api/assets/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_url: url, collection: collectionName, type: key }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `Server error ${resp.status}`);
+      }
+      const data = await resp.json();
+      onSet(data.url);
+      onClose();
+    } catch (e) {
+      setSaveError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function cropAndSave() {
+    if (!percentCrop) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const resp = await fetch("/api/assets/crop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_url: draft,
+          x: percentCrop.x / 100,
+          y: percentCrop.y / 100,
+          w: percentCrop.width / 100,
+          h: percentCrop.height / 100,
+          collection: collectionName,
+          type: key,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `Server error ${resp.status}`);
+      }
+      const data = await resp.json();
+      onSet(data.url);
+      onClose();
+    } catch (e) {
+      setSaveError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const hasValidUrl = isAbsoluteUrl(draft);
 
   return (
     // biome-ignore lint/a11y/useSemanticElements: modal backdrop uses div with role
@@ -211,71 +287,132 @@ function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
       role="button"
       tabIndex={-1}
       aria-label="Close"
-      onClick={onClose}
+      onClick={cropMode ? undefined : onClose}
       onKeyDown={(e) => {
-        if (e.key === "Escape") onClose();
+        if (e.key === "Escape" && !cropMode) onClose();
       }}
     >
       {/* biome-ignore lint/a11y/noStaticElementInteractions: stopPropagation on modal body */}
-      <div className="url-modal" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <div
+        className={`url-modal${cropMode ? " url-modal--crop" : ""}`}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
         <div className="url-modal-header">
           <strong>Set {label}</strong>
           <span className="url-modal-hint">{hint}</span>
         </div>
 
-        {key === "square_art" && (
-          <div className="suggestion-section">
-            {loading && <p className="empty">Loading channel art…</p>}
-            {!loading && options.length > 0 && (
-              <>
-                <p className="suggestion-label">Channel avatars from matched videos:</p>
-                <div className="suggestion-chips">
-                  {options.map((opt) => (
-                    <button
-                      key={opt.uploader_url}
-                      type="button"
-                      className="suggestion-chip"
-                      title={opt.channel}
-                      onClick={() => setDraft(opt.avatar_url)}
-                    >
-                      {opt.avatar_url && <img src={opt.avatar_url} alt={opt.channel} />}
-                      <span>{opt.channel}</span>
-                    </button>
-                  ))}
-                </div>
-              </>
+        {cropMode ? (
+          <>
+            <div className="crop-container">
+              <ReactCrop
+                crop={crop}
+                onChange={(_, pct) => {
+                  setCrop(pct);
+                  setPercentCrop(pct);
+                }}
+                aspect={aspect}
+                keepSelection
+              >
+                <img
+                  src={draft}
+                  alt=""
+                  onLoad={onImageLoad}
+                  onError={() => {
+                    setCropMode(false);
+                    setSaveError("Could not load image — try 'Set' instead of 'Crop & Set'.");
+                  }}
+                  className="crop-source-img"
+                />
+              </ReactCrop>
+            </div>
+            <div className="url-modal-actions">
+              <button
+                type="button"
+                className="btn-primary btn-sm"
+                disabled={saving || !percentCrop}
+                onClick={cropAndSave}
+              >
+                {saving ? "Saving…" : "Apply Crop"}
+              </button>
+              <button type="button" className="btn-ghost btn-sm" disabled={saving} onClick={() => setCropMode(false)}>
+                Back
+              </button>
+            </div>
+            {saveError && <p className="url-modal-error">{saveError}</p>}
+          </>
+        ) : (
+          <>
+            {key === "square_art" && (
+              <div className="suggestion-section">
+                {loading && <p className="empty">Loading channel art…</p>}
+                {!loading && options.length > 0 && (
+                  <>
+                    <p className="suggestion-label">Channel avatars from matched videos:</p>
+                    <div className="suggestion-chips">
+                      {options.map((opt) => (
+                        <button
+                          key={opt.uploader_url}
+                          type="button"
+                          className="suggestion-chip"
+                          title={opt.channel}
+                          onClick={() => setDraft(opt.avatar_url)}
+                        >
+                          {opt.avatar_url && <img src={opt.avatar_url} alt={opt.channel} />}
+                          <span>{opt.channel}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+                {!loading && options.length === 0 && (
+                  <p className="empty">No channel art found yet — enter a URL manually.</p>
+                )}
+              </div>
             )}
-            {!loading && options.length === 0 && (
-              <p className="empty">No channel art found yet — enter a URL manually.</p>
-            )}
-          </div>
-        )}
 
-        <input
-          ref={inputRef}
-          type="text"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commit();
-          }}
-          placeholder="https://…"
-          className="url-modal-input"
-        />
-        {draft && isAbsoluteUrl(draft) && <img src={draft} alt="" className="url-modal-preview" />}
-        <div className="url-modal-actions">
-          <button type="button" className="btn-primary btn-sm" onClick={commit}>
-            Set
-          </button>
-          <button type="button" className="btn-ghost btn-sm" onClick={onClose}>
-            Cancel
-          </button>
-          {draft && (
-            <button type="button" className="btn-ghost btn-sm" onClick={() => setDraft("")}>
-              Clear
-            </button>
-          )}
-        </div>
+            <input
+              ref={inputRef}
+              type="text"
+              value={draft}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setSaveError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && hasValidUrl) saveToAssets(draft);
+              }}
+              placeholder="https://…"
+              className="url-modal-input"
+            />
+            {hasValidUrl && <img src={draft} alt="" className="url-modal-preview" />}
+            <div className="url-modal-actions">
+              <button
+                type="button"
+                className="btn-primary btn-sm"
+                disabled={saving || !hasValidUrl}
+                onClick={() => saveToAssets(draft)}
+              >
+                {saving ? "Saving…" : "Set"}
+              </button>
+              {hasValidUrl && (
+                <button type="button" className="btn-ghost btn-sm" disabled={saving} onClick={() => setCropMode(true)}>
+                  Crop & Set
+                </button>
+              )}
+              <button type="button" className="btn-ghost btn-sm" disabled={saving} onClick={onClose}>
+                Cancel
+              </button>
+              {draft && !saving && (
+                <button type="button" className="btn-ghost btn-sm" onClick={() => setDraft("")}>
+                  Clear
+                </button>
+              )}
+            </div>
+            {saveError && <p className="url-modal-error">{saveError}</p>}
+          </>
+        )}
       </div>
     </div>
   );

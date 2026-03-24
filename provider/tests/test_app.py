@@ -20,6 +20,12 @@ from app import app
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def _map_path(tmp_path: Path) -> Path:
+    """Return path to .yamp/collection_map.json, creating .yamp/ if needed."""
+    (tmp_path / ".yamp").mkdir(exist_ok=True)
+    return tmp_path / ".yamp" / "collection_map.json"
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -338,7 +344,7 @@ async def test_api_videos_no_map(patched_app):
     """No _collection_map.json → videos still returned, all unmatched."""
     _, info, tmp_path = patched_app
     # Ensure no map file exists
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     if map_file.exists():
         map_file.unlink()
 
@@ -354,7 +360,7 @@ async def test_api_videos_no_map(patched_app):
 async def test_api_videos_collections_error_flag(patched_app):
     """Corrupt collection map → videos returned with collections_error flag."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text("{{bad json}}", encoding="utf-8")
+    (_map_path(tmp_path)).write_text("{{bad json}}", encoding="utf-8")
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/videos")
     assert resp.status_code == 200
@@ -391,7 +397,7 @@ async def test_api_videos_thumbnail_relative_url(patched_app, monkeypatch):
 async def test_api_get_collections_no_map(patched_app):
     """No _collection_map.json → empty collections with zero counts."""
     _, _, tmp_path = patched_app
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     if map_file.exists():
         map_file.unlink()
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -406,7 +412,7 @@ async def test_api_get_collections_no_map(patched_app):
 async def test_api_get_collections_happy_path(patched_app):
     """Map exists → returns collections, counts, and unmatched_tags."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps(
             {
                 "collections": [{"name": "Alt-J", "rules": []}],
@@ -430,17 +436,17 @@ async def test_api_get_collections_happy_path(patched_app):
 async def test_api_get_collections_corrupt_map(patched_app):
     """Corrupt map file → HTTP 500."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text("{{bad json}}", encoding="utf-8")
+    (_map_path(tmp_path)).write_text("{{bad json}}", encoding="utf-8")
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/collections")
     assert resp.status_code == 500
-    assert "_collection_map.json" in resp.json()["detail"]
+    assert "collection_map.json" in resp.json()["detail"]
 
 
 async def test_api_get_collections_plex_unreachable(patched_app, monkeypatch):
     """Plex configured but _fetch_plex_collection_thumbs raises → 200 with plex_thumb_error, no 500."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps(
             {
                 "collections": [{"name": "Alt-J", "rules": []}],
@@ -652,7 +658,7 @@ async def test_plex_sections_bad_json(monkeypatch):
 async def test_api_put_collections_no_map(patched_app):
     """No _collection_map.json → 404."""
     _, _, tmp_path = patched_app
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     if map_file.exists():
         map_file.unlink()
     body = {"collections": []}
@@ -664,7 +670,7 @@ async def test_api_put_collections_no_map(patched_app):
 async def test_api_put_collections_duplicate_names(patched_app):
     """Duplicate collection names → 422 validation error."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
     )
@@ -682,7 +688,7 @@ async def test_api_put_collections_duplicate_names(patched_app):
 async def test_api_key_no_token_gets_403(patched_app, monkeypatch):
     """When API_KEY is set, request without Authorization header gets 403."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
     )
@@ -695,7 +701,7 @@ async def test_api_key_no_token_gets_403(patched_app, monkeypatch):
 async def test_api_key_wrong_token_gets_403(patched_app, monkeypatch):
     """When API_KEY is set, wrong token gets 403."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
     )
@@ -712,7 +718,7 @@ async def test_api_key_wrong_token_gets_403(patched_app, monkeypatch):
 async def test_api_key_correct_token_accepted(patched_app, monkeypatch):
     """When API_KEY is set, correct Bearer token is accepted."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
     )
@@ -729,7 +735,7 @@ async def test_api_key_correct_token_accepted(patched_app, monkeypatch):
 async def test_api_put_collections_recompute_failure(patched_app, monkeypatch):
     """Collections are saved but recompute raises → HTTP 500 with descriptive message."""
     _, _, tmp_path = patched_app
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     map_file.write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
@@ -1010,7 +1016,7 @@ async def test_put_collections_plex_sync_flag_with_credentials(patched_app, monk
     empty→empty with no image changes: no tasks queued → plex_sync: false.
     """
     _, _, tmp_path = patched_app
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     map_file.write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
@@ -1030,7 +1036,7 @@ async def test_put_collections_plex_sync_flag_with_credentials(patched_app, monk
 async def test_put_collections_rescan_triggered_on_rule_changes(patched_app, monkeypatch):
     """PUT /api/collections with rule changes → rescan IS triggered."""
     _, _, tmp_path = patched_app
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     map_file.write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
@@ -1051,7 +1057,7 @@ async def test_put_collections_rescan_only_on_rule_changes(patched_app, monkeypa
     """PUT /api/collections with only an image change → rescan is NOT triggered (no rule changes)."""
     _, _, tmp_path = patched_app
     existing = [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}], "image": None}]
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     map_file.write_text(
         json.dumps({"collections": existing, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
@@ -1390,7 +1396,7 @@ async def test_get_metadata_unknown_id(patched_app):
 async def test_get_metadata_resolve_collections_failure(patched_app, monkeypatch):
     """If resolve_collections raises, endpoint still returns 200 with empty collections."""
     _, info, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
     )
@@ -1411,7 +1417,7 @@ async def test_get_metadata_resolve_collections_failure(patched_app, monkeypatch
 async def test_get_metadata_resolve_collections_value_error(patched_app, monkeypatch):
     """If resolve_collections raises ValueError, endpoint still returns 200 with empty collections."""
     _, info, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
     )
@@ -1935,7 +1941,7 @@ async def test_put_collections_art_field_triggers_artwork_sync(patched_app, monk
     """Changing only the 'art' field (no rule changes) queues artwork sync but not rescan."""
     _, _, tmp_path = patched_app
     existing = [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}], "art": None}]
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     map_file.write_text(
         json.dumps({"collections": existing, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
@@ -2289,7 +2295,7 @@ def test_get_channel_urls_deduplication(tmp_path, monkeypatch):
         "unmatched_ids": [],
         "unmatched_tags": {},
     }
-    save_map(str(tmp_path / "_collection_map.json"), col_map)
+    save_map(str(_map_path(tmp_path)), col_map)
 
     monkeypatch.setattr(yamp_app, "_video_index", {vid: str(tmp_path / f"{vid}.info.json") for vid in ids})
     # meta cache provides the match fields so the function skips disk reads for filtering
@@ -2321,7 +2327,7 @@ def test_get_channel_urls_unicode_decode_error_skipped(tmp_path, monkeypatch):
         "unmatched_ids": [],
         "unmatched_tags": {},
     }
-    save_map(str(tmp_path / "_collection_map.json"), col_map)
+    save_map(str(_map_path(tmp_path)), col_map)
 
     monkeypatch.setattr(
         yamp_app,
@@ -2415,7 +2421,7 @@ async def test_put_collections_logo_field_triggers_artwork_sync(patched_app, mon
     """Changing only the 'logo' field queues artwork sync but not rescan."""
     _, _, tmp_path = patched_app
     existing = [{"name": "Jazz", "rules": [{"field": "tags", "match": "exact", "values": ["jazz"]}], "logo": None}]
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     map_file.write_text(
         json.dumps({"collections": existing, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
@@ -2447,7 +2453,7 @@ async def test_put_collections_square_art_field_triggers_artwork_sync(patched_ap
     _, _, tmp_path = patched_app
     rule = {"field": "tags", "match": "exact", "values": ["jazz"]}
     existing = [{"name": "Jazz", "rules": [rule], "square_art": None}]
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     map_file.write_text(
         json.dumps({"collections": existing, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
@@ -2477,7 +2483,7 @@ async def test_put_collections_square_art_field_triggers_artwork_sync(patched_ap
 async def test_put_collections_rule_change_with_no_image_skips_artwork_sync(patched_app, monkeypatch):
     """Rule change with all image fields None → rescan triggered, artwork sync NOT triggered."""
     _, _, tmp_path = patched_app
-    map_file = tmp_path / "_collection_map.json"
+    map_file = _map_path(tmp_path)
     map_file.write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
@@ -2643,7 +2649,7 @@ async def test_api_channel_art_get_urls_raises(patched_app, monkeypatch):
 async def test_api_get_collections_oserror(patched_app, monkeypatch):
     """OSError reading collection map → 500 with 'check file permissions' in detail."""
     _, _, tmp_path = patched_app
-    (tmp_path / "_collection_map.json").write_text(
+    (_map_path(tmp_path)).write_text(
         json.dumps({"collections": [], "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
         encoding="utf-8",
     )
@@ -2658,3 +2664,360 @@ async def test_api_get_collections_oserror(patched_app, monkeypatch):
 
     assert resp.status_code == 500
     assert "file permissions" in resp.json()["detail"]
+
+
+# ── _slugify ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("GoGo Penguin", "gogo_penguin"),
+        ("Alt-J", "alt_j"),
+        ("!!!", "unnamed"),
+        ("", "unnamed"),
+        ("  spaces  ", "spaces"),
+        ("a" * 50, "a" * 50),
+    ],
+)
+def test_slugify(name, expected):
+    from app import _slugify
+
+    assert _slugify(name) == expected
+
+
+# ── _ASSETS_FILENAME_RE ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "filename,should_match",
+    [
+        ("a.jpg", True),
+        ("foo_poster.jpg", True),
+        ("foo_poster.JPG", True),  # IGNORECASE
+        ("foo_poster.jpeg", True),
+        ("foo_poster.png", True),
+        ("foo_poster.webp", True),
+        ("x" * 200 + ".png", True),  # max stem length
+        ("x" * 201 + ".png", False),  # stem too long
+        (".jpg", False),  # zero-char stem
+        ("foo.gif", False),  # unsupported extension
+        ("foo bar.jpg", False),  # space in name
+        ("../etc/passwd", False),  # path traversal
+        ("../../secrets.jpg", False),  # path traversal with extension
+    ],
+)
+def test_assets_filename_re(filename, should_match):
+    from app import _ASSETS_FILENAME_RE
+
+    assert bool(_ASSETS_FILENAME_RE.match(filename)) == should_match
+
+
+# ── _migrate_yamp_dir ─────────────────────────────────────────────────────────
+
+
+def test_migrate_yamp_dir_fresh_install(tmp_path, monkeypatch):
+    """No old map, no .yamp/ → .yamp/assets/ created, nothing copied."""
+    from app import _migrate_yamp_dir
+
+    yamp_dir = tmp_path / ".yamp"
+    assets_dir = yamp_dir / "assets"
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(yamp_app, "_YAMP_DIR", str(yamp_dir))
+    monkeypatch.setattr(yamp_app, "_ASSETS_DIR", str(assets_dir))
+
+    _migrate_yamp_dir()
+
+    assert assets_dir.is_dir()
+    assert not (yamp_dir / "collection_map.json").exists()
+
+
+def test_migrate_yamp_dir_already_migrated(tmp_path, monkeypatch):
+    """If .yamp/ already exists, ensure assets/ dir is created and no copy occurs."""
+    from app import _migrate_yamp_dir
+
+    yamp_dir = tmp_path / ".yamp"
+    yamp_dir.mkdir()
+    assets_dir = yamp_dir / "assets"
+    (yamp_dir / "collection_map.json").write_text("{}", encoding="utf-8")
+    old_map = tmp_path / "_collection_map.json"
+    old_map.write_text('{"old": true}', encoding="utf-8")
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(yamp_app, "_YAMP_DIR", str(yamp_dir))
+    monkeypatch.setattr(yamp_app, "_ASSETS_DIR", str(assets_dir))
+
+    _migrate_yamp_dir()
+
+    assert assets_dir.is_dir()
+    # Old map should NOT have been renamed — already migrated
+    assert old_map.exists()
+    assert (yamp_dir / "collection_map.json").read_text() == "{}"
+
+
+def test_migrate_yamp_dir_migration_happy_path(tmp_path, monkeypatch):
+    """Old map exists, no .yamp/ → map copied, old renamed to .bak."""
+    from app import _migrate_yamp_dir
+    from collection_map import MAPPING_FILE_NAME
+
+    yamp_dir = tmp_path / ".yamp"
+    assets_dir = yamp_dir / "assets"
+    old_map = tmp_path / "_collection_map.json"
+    old_map.write_text('{"collections":[]}', encoding="utf-8")
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(yamp_app, "_YAMP_DIR", str(yamp_dir))
+    monkeypatch.setattr(yamp_app, "_ASSETS_DIR", str(assets_dir))
+
+    _migrate_yamp_dir()
+
+    assert (yamp_dir / MAPPING_FILE_NAME).read_text() == '{"collections":[]}'
+    assert (tmp_path / "_collection_map.json.bak").exists()
+    assert not old_map.exists()
+    assert assets_dir.is_dir()
+
+
+def test_migrate_yamp_dir_rename_failure_no_crash(tmp_path, monkeypatch):
+    """If rename to .bak fails, function logs a warning but does not crash."""
+    import os
+
+    from app import _migrate_yamp_dir
+
+    yamp_dir = tmp_path / ".yamp"
+    assets_dir = yamp_dir / "assets"
+    old_map = tmp_path / "_collection_map.json"
+    old_map.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(yamp_app, "_YAMP_DIR", str(yamp_dir))
+    monkeypatch.setattr(yamp_app, "_ASSETS_DIR", str(assets_dir))
+
+    original_rename = os.rename
+
+    def _fail_rename(src, dst):
+        raise OSError("cross-device rename")
+
+    monkeypatch.setattr(os, "rename", _fail_rename)
+    # Should not raise
+    _migrate_yamp_dir()
+    monkeypatch.setattr(os, "rename", original_rename)
+
+    # Copy still succeeded
+    from collection_map import MAPPING_FILE_NAME
+
+    assert (yamp_dir / MAPPING_FILE_NAME).exists()
+
+
+# ── GET /api/assets/{filename} ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def assets_dir(tmp_path, monkeypatch):
+    d = tmp_path / "assets"
+    d.mkdir()
+    monkeypatch.setattr(yamp_app, "_ASSETS_DIR", str(d))
+    return d
+
+
+async def test_api_assets_happy_path(assets_dir):
+    img_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 100  # fake JPEG
+    (assets_dir / "foo_image.jpg").write_bytes(img_bytes)
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/assets/foo_image.jpg")
+    assert resp.status_code == 200
+    assert resp.content == img_bytes
+
+
+async def test_api_assets_file_not_found(assets_dir):
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/assets/missing.jpg")
+    assert resp.status_code == 404
+
+
+async def test_api_assets_dotdot_filename_rejected(assets_dir):
+    """A filename containing '..' is rejected by _ASSETS_FILENAME_RE."""
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/assets/..foo.jpg")
+    assert resp.status_code == 404
+
+
+async def test_api_assets_invalid_extension(assets_dir):
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/assets/foo.gif")
+    assert resp.status_code == 404
+
+
+# ── POST /api/assets/save ─────────────────────────────────────────────────────
+
+
+def _make_image_response(content_type="image/jpeg", status_code=200, content=b"\xff\xd8\xff"):
+    mock_resp = MagicMock()
+    mock_resp.status_code = status_code
+    mock_resp.headers = {"content-type": content_type}
+    mock_resp.content = content
+    return mock_resp
+
+
+async def test_api_assets_save_happy_path(assets_dir):
+    fake_bytes = b"\xff\xd8\xff" + b"\x00" * 50
+    mock_client = _make_plex_mock(return_value=_make_image_response(content=fake_bytes))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post(
+                "/api/assets/save",
+                json={"source_url": "https://example.com/img.jpg", "collection": "My Band", "type": "image"},
+            )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "url" in data
+    assert "my_band_image.jpg" in data["url"]
+    assert (assets_dir / "my_band_image.jpg").read_bytes() == fake_bytes
+
+
+async def test_api_assets_save_invalid_type(assets_dir):
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/assets/save",
+            json={"source_url": "https://example.com/img.jpg", "collection": "x", "type": "../../evil"},
+        )
+    assert resp.status_code == 422
+
+
+async def test_api_assets_save_non_http_url(assets_dir):
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/assets/save",
+            json={"source_url": "file:///etc/passwd", "collection": "x", "type": "image"},
+        )
+    assert resp.status_code == 422
+
+
+async def test_api_assets_save_non_image_content_type(assets_dir):
+    mock_client = _make_plex_mock(return_value=_make_image_response(content_type="text/html"))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post(
+                "/api/assets/save",
+                json={"source_url": "https://example.com/page.html", "collection": "x", "type": "art"},
+            )
+    assert resp.status_code == 422
+    assert "image" in resp.json()["detail"].lower()
+
+
+async def test_api_assets_save_upstream_non_200(assets_dir):
+    mock_client = _make_plex_mock(return_value=_make_image_response(status_code=404))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post(
+                "/api/assets/save",
+                json={"source_url": "https://example.com/img.jpg", "collection": "x", "type": "image"},
+            )
+    assert resp.status_code == 502
+
+
+async def test_api_assets_save_timeout(assets_dir):
+    mock_client = _make_plex_mock(side_effect=httpx.TimeoutException("timeout"))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post(
+                "/api/assets/save",
+                json={"source_url": "https://example.com/img.jpg", "collection": "x", "type": "image"},
+            )
+    assert resp.status_code == 504
+
+
+# ── POST /api/assets/crop ─────────────────────────────────────────────────────
+
+
+def _minimal_jpeg_bytes() -> bytes:
+    """Create a tiny valid JPEG via Pillow."""
+    import io as _io
+
+    try:
+        from PIL import Image
+
+        buf = _io.BytesIO()
+        Image.new("RGB", (100, 100), color=(128, 64, 32)).save(buf, "JPEG")
+        return buf.getvalue()
+    except ImportError:
+        pytest.skip("Pillow not installed")
+
+
+async def test_api_assets_crop_happy_path(assets_dir):
+    img_bytes = _minimal_jpeg_bytes()
+    mock_client = _make_plex_mock(return_value=_make_image_response(content=img_bytes))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post(
+                "/api/assets/crop",
+                json={
+                    "source_url": "https://example.com/img.jpg",
+                    "collection": "My Band",
+                    "type": "image",
+                    "x": 0.1,
+                    "y": 0.1,
+                    "w": 0.5,
+                    "h": 0.5,
+                },
+            )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "my_band_image.jpg" in data["url"]
+    assert (assets_dir / "my_band_image.jpg").exists()
+
+
+async def test_api_assets_crop_empty_region(assets_dir):
+    img_bytes = _minimal_jpeg_bytes()
+    mock_client = _make_plex_mock(return_value=_make_image_response(content=img_bytes))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post(
+                "/api/assets/crop",
+                json={
+                    "source_url": "https://example.com/img.jpg",
+                    "collection": "x",
+                    "type": "art",
+                    "x": 0.0,
+                    "y": 0.0,
+                    "w": 0.0,
+                    "h": 1.0,
+                },
+            )
+    assert resp.status_code == 422
+    assert "empty" in resp.json()["detail"].lower()
+
+
+async def test_api_assets_crop_pillow_unavailable(assets_dir, monkeypatch):
+    monkeypatch.setattr(yamp_app, "_PIL_AVAILABLE", False)
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/assets/crop",
+            json={
+                "source_url": "https://example.com/img.jpg",
+                "collection": "x",
+                "type": "art",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 1.0,
+                "h": 1.0,
+            },
+        )
+    assert resp.status_code == 503
+    assert "Pillow" in resp.json()["detail"]
+
+
+async def test_api_assets_crop_corrupt_image(assets_dir):
+    mock_client = _make_plex_mock(return_value=_make_image_response(content=b"not an image"))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post(
+                "/api/assets/crop",
+                json={
+                    "source_url": "https://example.com/img.jpg",
+                    "collection": "x",
+                    "type": "image",
+                    "x": 0.0,
+                    "y": 0.0,
+                    "w": 1.0,
+                    "h": 1.0,
+                },
+            )
+    assert resp.status_code == 422
+    assert "decode" in resp.json()["detail"].lower()

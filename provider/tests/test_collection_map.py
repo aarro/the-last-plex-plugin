@@ -9,7 +9,9 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def _fresh_map(tmp_path: Path) -> tuple[str, str]:
     """Copy fixture files to tmp_path and return (info_json_path, map_path)."""
-    map_path = tmp_path / "_collection_map.json"
+    yamp_dir = tmp_path / ".yamp"
+    yamp_dir.mkdir(exist_ok=True)
+    map_path = yamp_dir / "collection_map.json"
     shutil.copy(FIXTURES / "_collection_map.json", map_path)
     return str(FIXTURES / "sample.info.json"), str(map_path)
 
@@ -172,7 +174,9 @@ def test_invalid_match_type_still_writes_unmatched_state(tmp_path):
         "unmatched_ids": [],
         "unmatched_tags": {},
     }
-    map_path = tmp_path / "_collection_map.json"
+    yamp_dir = tmp_path / ".yamp"
+    yamp_dir.mkdir(exist_ok=True)
+    map_path = yamp_dir / "collection_map.json"
     map_path.write_text(json.dumps(map_data), encoding="utf-8")
 
     result = resolve_collections(info, str(map_path))
@@ -332,14 +336,18 @@ def test_recompute_newly_matched_tag_removed_from_unmatched(tmp_path):
 
 
 def test_find_collection_map_direct(tmp_path):
-    map_path = tmp_path / "_collection_map.json"
+    yamp_dir = tmp_path / ".yamp"
+    yamp_dir.mkdir()
+    map_path = yamp_dir / "collection_map.json"
     map_path.write_text("{}", encoding="utf-8")
     found = find_collection_map(str(tmp_path), str(tmp_path))
     assert found == str(map_path)
 
 
 def test_find_collection_map_walk_up(tmp_path):
-    map_path = tmp_path / "_collection_map.json"
+    yamp_dir = tmp_path / ".yamp"
+    yamp_dir.mkdir()
+    map_path = yamp_dir / "collection_map.json"
     map_path.write_text("{}", encoding="utf-8")
     subdir = tmp_path / "channel" / "videos"
     subdir.mkdir(parents=True)

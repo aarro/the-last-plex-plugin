@@ -5,6 +5,7 @@ A Plex Custom Metadata Provider for yt-dlp downloads.
 
 import asyncio
 import io
+import ipaddress
 import json
 import logging
 import os
@@ -212,7 +213,10 @@ def _try_index_from_filename(video_id: str, media_path: str) -> bool:
     lives next to it (yt-dlp flat layout) or in the same per-video folder (MeTube layout).
     Returns True if the entry was added to the index.
     """
-    p = Path(media_path)
+    p = Path(media_path).resolve()
+    if not p.is_relative_to(Path(DATA_PATH).resolve()):
+        logger.warning("_try_index_from_filename: path '%s' is outside DATA_PATH — ignoring", media_path)
+        return False
     # yt-dlp flat:  Title [ID].mp4  →  Title [ID].info.json
     # MeTube:       Title [ID]/Title.mp4  →  Title [ID]/Title.info.json
     candidate = p.with_suffix(".info.json")
@@ -278,8 +282,8 @@ def _fetch_channel_art(uploader_url: str, data_path: str | None = None) -> dict 
                         if entry.is_dir() and entry.name.endswith(suffix):
                             channel_dir = entry.path
                             break
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.warning("_fetch_channel_art: could not scan '%s' for channel dir: %s", data_path, e)
             if channel_dir is None:
                 direct = os.path.join(data_path, channel_name)
                 if os.path.isdir(direct):
@@ -398,6 +402,8 @@ async def _prefetch_channel_art_bg(collection_names: list[str]) -> None:
                 )
                 continue
             for url in urls:
+                if "youtube.com" not in url:
+                    continue  # channel art only supported for YouTube; skip without caching
                 if url not in _channel_art_cache:
                     try:
                         result = await asyncio.to_thread(_fetch_channel_art, url, DATA_PATH)
@@ -414,7 +420,7 @@ async def _prefetch_channel_art_bg(collection_names: list[str]) -> None:
                         logger.info("_prefetch_channel_art_bg: cached art for '%s'", url)
                     else:
                         logger.debug(
-                            "_prefetch_channel_art_bg: no art fetched for '%s' (non-YouTube URL or no result)",
+                            "_prefetch_channel_art_bg: no result fetching art for '%s'",
                             url,
                         )
                         _channel_art_cache[url] = _FETCH_ERROR_SENTINEL
@@ -459,6 +465,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def _rebuild_indexes(data_path: str) -> tuple[dict, dict, dict]:
+    """Build video index, stem index, and meta cache in one synchronous call.
+
+    Returns (video_index, stem_index, meta_cache) so all three globals can be
+    replaced atomically in a single assignment — no window where they're mismatched.
+    """
+    idx, stem = build_index(data_path)
+    return idx, stem, build_meta_cache(idx)
+
+
 app = FastAPI(title="YAMP", lifespan=lifespan)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -476,8 +492,7 @@ async def _get_info_json(video_id: str) -> dict:
     path = _video_index.get(video_id)
     if not path:
         if time.monotonic() - _last_rebuild > _REBUILD_COOLDOWN:
-            _video_index, _stem_index = await asyncio.to_thread(build_index, DATA_PATH)
-            _video_meta_cache = await asyncio.to_thread(build_meta_cache, _video_index)
+            _video_index, _stem_index, _video_meta_cache = await asyncio.to_thread(_rebuild_indexes, DATA_PATH)
             _last_rebuild = time.monotonic()
         path = _video_index.get(video_id)
     if not path:
@@ -514,11 +529,15 @@ def _migrate_yamp_dir() -> None:
     Creates .yamp/assets/ so the directory is always present after startup.
     """
     old_map = os.path.join(DATA_PATH, "_collection_map.json")
-    if os.path.exists(_YAMP_DIR):
-        # Already migrated or fresh setup — ensure assets subdir exists.
+    already_exists = os.path.exists(_YAMP_DIR)
+    try:
         os.makedirs(_ASSETS_DIR, exist_ok=True)
+    except OSError as e:
+        logger.error("_migrate_yamp_dir: cannot create assets directory '%s': %s", _ASSETS_DIR, e)
+        raise RuntimeError(f"Cannot create YAMP assets directory '{_ASSETS_DIR}'") from e
+    if already_exists:
+        # Already migrated or fresh setup — assets dir ensured above.
         return
-    os.makedirs(_ASSETS_DIR, exist_ok=True)
     if not os.path.exists(old_map):
         return
     new_map = os.path.join(_YAMP_DIR, MAPPING_FILE_NAME)
@@ -1516,8 +1535,7 @@ async def api_fix_thumbnails(request: Request):
 async def api_rebuild_index():
     """Force a rebuild of the in-memory video index."""
     global _video_index, _stem_index, _video_meta_cache
-    _video_index, _stem_index = await asyncio.to_thread(build_index, DATA_PATH)
-    _video_meta_cache = await asyncio.to_thread(build_meta_cache, _video_index)
+    _video_index, _stem_index, _video_meta_cache = await asyncio.to_thread(_rebuild_indexes, DATA_PATH)
     if not _video_index:
         logger.warning("Rebuilt index is empty — no videos found under %s", DATA_PATH)
     return {"indexed": len(_video_index)}
@@ -1548,10 +1566,29 @@ class AssetCropBody(BaseModel):
 _MAX_IMAGE_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
 
 
+def _is_internal_host(url: str) -> bool:
+    """Return True if the URL's hostname is a private/loopback/link-local IP address.
+
+    Only checks literal IP addresses — hostname-based DNS rebinding is not mitigated here.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).hostname or ""
+        if not host or host == "localhost":
+            return True
+        addr = ipaddress.ip_address(host)
+        return addr.is_private or addr.is_loopback or addr.is_link_local
+    except ValueError:
+        return False  # hostname (not a raw IP) — allow through
+
+
 async def _download_image(url: str) -> bytes:
     """Download an image URL and return its bytes. Raises HTTPException on failure."""
     if not url.startswith(("https://", "http://")):
         raise HTTPException(status_code=422, detail="Only http/https URLs are supported")
+    if _is_internal_host(url):
+        raise HTTPException(status_code=422, detail="URL resolves to a private/internal address")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), follow_redirects=True) as client:
             resp = await client.get(url)
@@ -1574,7 +1611,8 @@ async def api_assets_save(body: AssetSaveBody, request: Request):
     """Download a URL and save it as a hard file in .yamp/assets/."""
     os.makedirs(_ASSETS_DIR, exist_ok=True)
     data = await _download_image(body.source_url)
-    filename = f"{_slugify(body.collection)}_{body.type}.jpg"
+    ext = "png" if data[:4] == b"\x89PNG" else "jpg"
+    filename = f"{_slugify(body.collection)}_{body.type}.{ext}"
     dest = os.path.join(_ASSETS_DIR, filename)
     try:
         Path(dest).write_bytes(data)

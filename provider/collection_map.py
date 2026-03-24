@@ -237,8 +237,6 @@ def resolve_collections(info_json: dict, mapping_path: str) -> list[str]:
             fresh_append = False
 
             if c_matches:
-                if v_id in unmatched_set:
-                    mapping_data["unmatched_ids"].remove(v_id)
                 matched_ids = mapping_data.setdefault("matched_ids", [])
                 if v_id not in matched_set:
                     matched_ids.append(v_id)

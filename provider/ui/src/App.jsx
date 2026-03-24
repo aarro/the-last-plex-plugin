@@ -29,6 +29,15 @@ export default function App() {
     if (!Array.isArray(vidData?.videos)) throw new Error("Unexpected response from /api/videos");
     setData(colData);
     setVideos(vidData.videos);
+    if (vidData.collections_error) {
+      setStatus({
+        type: "err",
+        msg: "Collection map unreadable — video matches may be incomplete. Check server logs.",
+      });
+    }
+    if (colData.plex_thumb_error) {
+      console.warn("api_get_collections: Plex thumbnails failed to load");
+    }
   }, []);
 
   useEffect(() => {
@@ -108,6 +117,7 @@ export default function App() {
         await load();
       } catch (e) {
         console.error("Post-rebuild reload failed:", e);
+        setStatus({ type: "err", msg: `Index rebuilt but page refresh failed — ${e.message}. Reload the page.` });
       }
     } catch (e) {
       setStatus({ type: "err", msg: `Index rebuild failed: ${e.message}` });

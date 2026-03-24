@@ -2,7 +2,15 @@ import json
 import shutil
 from pathlib import Path
 
-from collection_map import find_collection_map, match_video, recompute_all_collections, resolve_collections
+import pytest
+
+from collection_map import (
+    diff_collections,
+    find_collection_map,
+    match_video,
+    recompute_all_collections,
+    resolve_collections,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -465,3 +473,88 @@ def test_recompute_empty_index(tmp_path):
     assert result["matched_ids"] == []
     assert result["unmatched_ids"] == []
     assert result["unmatched_tags"] == {}
+
+
+# ── diff_collections ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "old, new, expected_changed, expected_has_changes",
+    [
+        # Both empty
+        ([], [], set(), False),
+        # Collection added
+        ([], [{"name": "Jazz", "rules": [{"field": "tags", "values": ["jazz"], "match": "exact"}]}], {"Jazz"}, True),
+        # Collection deleted
+        ([{"name": "Jazz", "rules": []}], [], {"Jazz"}, True),
+        # Rules modified
+        (
+            [{"name": "Jazz", "rules": [{"field": "tags", "values": ["jazz"], "match": "exact"}]}],
+            [{"name": "Jazz", "rules": [{"field": "tags", "values": ["bebop"], "match": "exact"}]}],
+            {"Jazz"},
+            True,
+        ),
+        # Image URL only changed (rules identical) — no recompute needed
+        (
+            [{"name": "Jazz", "rules": [], "image": "https://old.example.com/a.jpg"}],
+            [{"name": "Jazz", "rules": [], "image": "https://new.example.com/b.jpg"}],
+            set(),
+            False,
+        ),
+    ],
+)
+def test_diff_collections(old, new, expected_changed, expected_has_changes):
+    rules_changed, has_changes = diff_collections(old, new)
+    assert rules_changed == expected_changed
+    assert has_changes == expected_has_changes
+
+
+# ── recompute_all_collections with meta_cache ─────────────────────────────────
+
+
+def _make_map_with_rules(tmp_path: Path) -> str:
+    """Write a collection_map.json with one rule-based collection and return its path."""
+    yamp_dir = tmp_path / ".yamp"
+    yamp_dir.mkdir(exist_ok=True)
+    map_path = yamp_dir / "collection_map.json"
+    data = {
+        "collections": [
+            {
+                "name": "TestCol",
+                "rules": [{"field": "tags", "values": ["testtag"], "match": "exact"}],
+            }
+        ],
+        "matched_ids": [],
+        "unmatched_ids": [],
+        "unmatched_tags": {},
+    }
+    with open(map_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    return str(map_path)
+
+
+def test_recompute_with_meta_cache_matches_video(tmp_path):
+    """meta_cache path: video in cache with matching tag → matched."""
+    map_path = _make_map_with_rules(tmp_path)
+    # Provide fake index and cache — no real files on disk
+    fake_index = {"vid1": "/nonexistent/vid1.info.json"}
+    fake_cache = {"vid1": {"tags": ["testtag"], "title": "Test Video"}}
+    stats = recompute_all_collections(fake_index, map_path, meta_cache=fake_cache)
+    assert stats["matched"] == 1
+    assert stats["unmatched"] == 0
+    assert stats["skipped"] == 0
+    result = _load_map(map_path)
+    assert "vid1" in result["matched_ids"]
+
+
+def test_recompute_with_meta_cache_skips_missing_entry(tmp_path):
+    """meta_cache path: video in index but absent from cache → skipped, warning logged."""
+    map_path = _make_map_with_rules(tmp_path)
+    fake_index = {"vid_missing": "/nonexistent/missing.info.json"}
+    # Cache intentionally does not contain vid_missing
+    fake_cache: dict = {}
+    stats = recompute_all_collections(fake_index, map_path, meta_cache=fake_cache)
+    assert stats["skipped"] == 1
+    assert stats["matched"] == 0
+    result = _load_map(map_path)
+    assert result["matched_ids"] == []

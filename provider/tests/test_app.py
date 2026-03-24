@@ -3021,3 +3021,227 @@ async def test_api_assets_crop_corrupt_image(assets_dir):
             )
     assert resp.status_code == 422
     assert "decode" in resp.json()["detail"].lower()
+
+
+# ── _try_index_from_filename ──────────────────────────────────────────────────
+
+
+def test_try_index_from_filename_found(tmp_path, monkeypatch):
+    """Sidecar .info.json inside DATA_PATH → returns True, indexed with meta cache."""
+    from app import _try_index_from_filename
+
+    info = {"id": "abc123", "title": "Test", "tags": ["jazz"]}
+    info_path = tmp_path / "abc123.info.json"
+    info_path.write_text(__import__("json").dumps(info), encoding="utf-8")
+
+    video_index: dict = {}
+    meta_cache: dict = {}
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(yamp_app, "_video_index", video_index)
+    monkeypatch.setattr(yamp_app, "_video_meta_cache", meta_cache)
+    monkeypatch.setattr(yamp_app, "_stem_index", {})
+
+    result = _try_index_from_filename("abc123", str(tmp_path / "abc123.mp4"))
+
+    assert result is True
+    assert "abc123" in video_index
+    assert "abc123" in meta_cache
+    assert meta_cache["abc123"].get("tags") == ["jazz"]
+
+
+def test_try_index_from_filename_not_found(tmp_path, monkeypatch):
+    """No sidecar → returns False, nothing added to index."""
+    from app import _try_index_from_filename
+
+    video_index: dict = {}
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(yamp_app, "_video_index", video_index)
+    monkeypatch.setattr(yamp_app, "_video_meta_cache", {})
+    monkeypatch.setattr(yamp_app, "_stem_index", {})
+
+    result = _try_index_from_filename("nope", str(tmp_path / "nope.mp4"))
+
+    assert result is False
+    assert "nope" not in video_index
+
+
+def test_try_index_from_filename_outside_data_path(tmp_path, monkeypatch):
+    """Path outside DATA_PATH → rejected, returns False, nothing added to index."""
+    from app import _try_index_from_filename
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    info_path = outside_dir / "evil.info.json"
+    info_path.write_text('{"id": "evil"}', encoding="utf-8")
+
+    video_index: dict = {}
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(data_dir))
+    monkeypatch.setattr(yamp_app, "_video_index", video_index)
+    monkeypatch.setattr(yamp_app, "_video_meta_cache", {})
+    monkeypatch.setattr(yamp_app, "_stem_index", {})
+
+    result = _try_index_from_filename("evil", str(outside_dir / "evil.mp4"))
+
+    assert result is False
+    assert "evil" not in video_index
+
+
+def test_try_index_from_filename_corrupt_json(tmp_path, monkeypatch):
+    """Sidecar found but JSON corrupt → returns True (indexed), meta cache entry absent."""
+    from app import _try_index_from_filename
+
+    info_path = tmp_path / "corrupt123.info.json"
+    info_path.write_text("not valid json {{{{", encoding="utf-8")
+
+    video_index: dict = {}
+    meta_cache: dict = {}
+    monkeypatch.setattr(yamp_app, "DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(yamp_app, "_video_index", video_index)
+    monkeypatch.setattr(yamp_app, "_video_meta_cache", meta_cache)
+    monkeypatch.setattr(yamp_app, "_stem_index", {})
+
+    result = _try_index_from_filename("corrupt123", str(tmp_path / "corrupt123.mp4"))
+
+    assert result is True
+    assert "corrupt123" in video_index
+    assert "corrupt123" not in meta_cache
+
+
+# ── build_meta_cache ──────────────────────────────────────────────────────────
+
+
+def test_build_meta_cache_normal(tmp_path):
+    """Returns dict with only MATCH_FIELDS subset for each video."""
+    import json as _json
+
+    from app import build_meta_cache
+    from collection_map import MATCH_FIELDS
+
+    info = {
+        "id": "vid1",
+        "title": "My Video",
+        "tags": ["jazz"],
+        "upload_date": "20240101",  # not in MATCH_FIELDS — should be excluded
+        "thumbnail": "https://example.com/thumb.jpg",
+    }
+    path = tmp_path / "vid1.info.json"
+    path.write_text(_json.dumps(info), encoding="utf-8")
+
+    cache = build_meta_cache({"vid1": str(path)})
+
+    assert "vid1" in cache
+    for key in cache["vid1"]:
+        assert key in MATCH_FIELDS
+    assert "upload_date" not in cache["vid1"]
+    assert cache["vid1"]["title"] == "My Video"
+    assert cache["vid1"]["tags"] == ["jazz"]
+
+
+def test_build_meta_cache_skips_corrupt_file(tmp_path):
+    """Corrupt .info.json is skipped; valid entries still present."""
+    import json as _json
+
+    from app import build_meta_cache
+
+    good_path = tmp_path / "good.info.json"
+    good_path.write_text(_json.dumps({"id": "good", "title": "Good Video", "tags": []}), encoding="utf-8")
+    bad_path = tmp_path / "bad.info.json"
+    bad_path.write_text("{{not json", encoding="utf-8")
+
+    cache = build_meta_cache({"good": str(good_path), "bad": str(bad_path)})
+
+    assert "good" in cache
+    assert "bad" not in cache
+
+
+# ── _download_image — size limit (413) ────────────────────────────────────────
+
+
+async def test_api_assets_save_too_large(assets_dir):
+    """Image exceeding _MAX_IMAGE_BYTES returns 413."""
+    oversized = b"\xff\xd8\xff" + b"\x00" * (yamp_app._MAX_IMAGE_BYTES + 1)
+    mock_client = _make_plex_mock(return_value=_make_image_response(content=oversized))
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with patch("app.httpx.AsyncClient", return_value=mock_client):
+            resp = await client.post(
+                "/api/assets/save",
+                json={"source_url": "https://example.com/huge.jpg", "collection": "x", "type": "image"},
+            )
+    assert resp.status_code == 413
+
+
+# ── _download_image — SSRF / internal host rejection ─────────────────────────
+
+
+async def test_api_assets_save_rejects_localhost(assets_dir):
+    """source_url pointing to localhost returns 422."""
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/assets/save",
+            json={"source_url": "http://127.0.0.1/secret", "collection": "x", "type": "image"},
+        )
+    assert resp.status_code == 422
+    assert "private" in resp.json()["detail"].lower() or "internal" in resp.json()["detail"].lower()
+
+
+async def test_api_assets_save_rejects_private_ip(assets_dir):
+    """source_url with a private IP (192.168.x.x) returns 422."""
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/assets/save",
+            json={"source_url": "http://192.168.1.1/img.jpg", "collection": "x", "type": "image"},
+        )
+    assert resp.status_code == 422
+
+
+async def test_api_assets_save_rejects_link_local(assets_dir):
+    """source_url with IMDS / link-local address returns 422."""
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/assets/save",
+            json={"source_url": "http://169.254.169.254/latest/meta-data/", "collection": "x", "type": "image"},
+        )
+    assert resp.status_code == 422
+
+
+# ── save_map error paths ──────────────────────────────────────────────────────
+
+
+def test_save_map_replace_fails_reraises(tmp_path):
+    """os.replace failure re-raises the OSError and cleans up the tmp file."""
+    from unittest.mock import patch
+
+    from collection_map import save_map
+
+    map_path = str(tmp_path / "collection_map.json")
+    data = {"collections": []}
+
+    err = OSError("disk full")
+    with patch("collection_map.os.replace", side_effect=err), pytest.raises(OSError, match="disk full"):
+        save_map(map_path, data)
+
+    # Temp file should have been cleaned up
+    assert not (tmp_path / "collection_map.json.tmp").exists()
+
+
+def test_save_map_replace_fails_cleanup_also_fails(tmp_path, caplog):
+    """When both os.replace and cleanup fail, original OSError is re-raised and warning logged."""
+    import logging
+    from unittest.mock import patch
+
+    from collection_map import save_map
+
+    map_path = str(tmp_path / "collection_map.json")
+    data = {"collections": []}
+
+    with (
+        patch("collection_map.os.replace", side_effect=OSError("disk full")),
+        patch("collection_map.os.unlink", side_effect=OSError("unlink failed")),
+        caplog.at_level(logging.WARNING, logger="collection_map"),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        save_map(map_path, data)
+
+    assert any("failed to clean up" in r.message for r in caplog.records)

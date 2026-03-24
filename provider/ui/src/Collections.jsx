@@ -12,6 +12,13 @@ const IMAGE_TYPES = [
   { key: "square_art", label: "Square Art", hint: "1:1 square" },
 ];
 
+// Maps image type keys to their channel art suggestion config.
+// Only these types show suggestion chips in the URL modal.
+const CHANNEL_ART_FIELDS = {
+  square_art: { urlKey: "avatar_url", label: "Channel avatars from matched videos:" },
+  art: { urlKey: "banner_url", label: "Channel banners from matched videos:" },
+};
+
 // Locked aspect ratios for the crop tool (undefined = free crop for logo)
 const CROP_ASPECTS = { image: 2 / 3, art: 16 / 9, logo: undefined, square_art: 1 };
 
@@ -122,7 +129,7 @@ function isAbsoluteUrl(url) {
 /** A small thumbnail chip for one image type with a "Set" button below. */
 function ImageChip({ imageType, url, onLightbox, onSet, hasSuggestions }) {
   const { key, label } = imageType;
-  const setLabel = key === "square_art" && hasSuggestions ? "Set ✨" : "Set";
+  const setLabel = key in CHANNEL_ART_FIELDS && hasSuggestions ? "Set ✨" : "Set";
 
   return (
     <div className="image-chip" data-type={key}>
@@ -179,6 +186,7 @@ function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
   const [draft, setDraft] = useState(currentUrl || "");
   const [options, setOptions] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [fetchFailed, setFetchFailed] = useState(false);
   const [cropMode, setCropMode] = useState(false);
   const [crop, setCrop] = useState(null);
   const [percentCrop, setPercentCrop] = useState(null);
@@ -187,16 +195,21 @@ function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
   const inputRef = useRef(null);
   const aspect = CROP_ASPECTS[key];
 
-  // For Square Art, fetch suggestions when the modal opens
+  const artField = CHANNEL_ART_FIELDS[key];
+
+  // For image types with channel art suggestions, fetch when the modal opens
   useEffect(() => {
-    if (key !== "square_art" || !collectionName) return;
+    if (!artField || !collectionName) return;
     setLoading(true);
     fetch(`/api/channel-art?collection=${encodeURIComponent(collectionName)}`)
       .then((r) => r.json())
       .then((d) => setOptions(d.options ?? []))
-      .catch(() => {})
+      .catch((e) => {
+        console.warn("Channel art fetch failed:", e);
+        setFetchFailed(true);
+      })
       .finally(() => setLoading(false));
-  }, [key, collectionName]);
+  }, [artField, collectionName]);
 
   useEffect(() => {
     if (!cropMode) inputRef.current?.focus();
@@ -344,30 +357,36 @@ function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
           </>
         ) : (
           <>
-            {key === "square_art" && (
+            {artField && (
               <div className="suggestion-section">
                 {loading && <p className="empty">Loading channel art…</p>}
                 {!loading && options.length > 0 && (
                   <>
-                    <p className="suggestion-label">Channel avatars from matched videos:</p>
+                    <p className="suggestion-label">{artField.label}</p>
                     <div className="suggestion-chips">
-                      {options.map((opt) => (
-                        <button
-                          key={opt.uploader_url}
-                          type="button"
-                          className="suggestion-chip"
-                          title={opt.channel}
-                          onClick={() => setDraft(opt.avatar_url)}
-                        >
-                          {opt.avatar_url && <img src={opt.avatar_url} alt={opt.channel} />}
-                          <span>{opt.channel}</span>
-                        </button>
-                      ))}
+                      {options
+                        .filter((opt) => opt[artField.urlKey])
+                        .map((opt) => (
+                          <button
+                            key={opt.uploader_url}
+                            type="button"
+                            className="suggestion-chip"
+                            title={opt.channel}
+                            onClick={() => setDraft(opt[artField.urlKey])}
+                          >
+                            <img src={opt[artField.urlKey]} alt={opt.channel} />
+                            <span>{opt.channel}</span>
+                          </button>
+                        ))}
                     </div>
                   </>
                 )}
                 {!loading && options.length === 0 && (
-                  <p className="empty">No channel art found yet — enter a URL manually.</p>
+                  <p className="empty">
+                    {fetchFailed
+                      ? "Could not load suggestions — enter a URL manually."
+                      : "No channel art found yet — enter a URL manually."}
+                  </p>
                 )}
               </div>
             )}
@@ -447,7 +466,7 @@ function CollectionCard({
     fetch(`/api/channel-art?collection=${encodeURIComponent(collection.name)}`)
       .then((r) => r.json())
       .then((d) => setChannelArtOptions(d.options ?? []))
-      .catch(() => {});
+      .catch((e) => console.warn("Channel art prefetch failed:", e));
   }, [expanded, collection.name, hasMatchedVideos]);
 
   useEffect(() => {
@@ -592,7 +611,10 @@ function CollectionCard({
                   url={isAbsoluteUrl(collection[imageType.key]) ? collection[imageType.key] : null}
                   onLightbox={setLightboxSrc}
                   onSet={() => openUrlModal(imageType.key)}
-                  hasSuggestions={imageType.key === "square_art" && channelArtOptions.length > 0}
+                  hasSuggestions={
+                    imageType.key in CHANNEL_ART_FIELDS &&
+                    channelArtOptions.some((o) => o[CHANNEL_ART_FIELDS[imageType.key].urlKey])
+                  }
                 />
               ))}
             </div>

@@ -257,6 +257,7 @@ section h2 {
   letter-spacing: 0.4px;
 }
 input[type="text"],
+textarea,
 select {
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -267,6 +268,7 @@ select {
   width: 100%;
 }
 input[type="text"]:focus,
+textarea:focus,
 select:focus {
   outline: 2px solid var(--accent);
   border-color: transparent;
@@ -275,9 +277,15 @@ select option {
   background: var(--surface2);
 }
 /* Name input in expanded card matches rule-form control style */
-.card-body-top input[type="text"] {
+.card-body-top input[type="text"],
+.card-body-top textarea {
   border-color: var(--muted);
   background: var(--bg);
+}
+textarea {
+  font-family: inherit;
+  line-height: 1.4;
+  resize: vertical;
 }
 
 .rule-form {
@@ -604,6 +612,11 @@ select option {
 .url-modal-hint {
   font-size: 11px;
   color: var(--muted);
+}
+.url-modal-where {
+  font-size: 12px;
+  color: var(--muted);
+  margin: -4px 0 0;
 }
 .url-modal-input {
   width: 100%;

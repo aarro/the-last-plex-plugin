@@ -834,6 +834,8 @@ class CollectionModel(BaseModel):
     art: str | None = None
     logo: str | None = None
     square_art: str | None = None
+    # Pushed to the Plex collection's Summary. None = never set (leave Plex alone); "" = clear it.
+    description: str | None = None
 
 
 class CollectionsBody(BaseModel):
@@ -956,12 +958,13 @@ async def api_put_collections(body: CollectionsBody, background_tasks: Backgroun
         if has_rule_changes:
             background_tasks.add_task(_do_rescan_bg)
             plex_tasks_queued = True
-        old_images = {c["name"]: {f: c.get(f) for f in _COLLECTION_IMAGE_FIELDS} for c in old_cols}
+        synced_fields = (*_COLLECTION_IMAGE_FIELDS, "description")
+        old_by_name = {c["name"]: {f: c.get(f) for f in synced_fields} for c in old_cols}
         for col in body.collections:
-            has_any_image = any(getattr(col, f) for f in _COLLECTION_IMAGE_FIELDS)
-            old = old_images.get(col.name, {})
-            image_changed = any(getattr(col, f) != old.get(f) for f in _COLLECTION_IMAGE_FIELDS)
-            if has_any_image and (col.name in rules_changed or image_changed):
+            has_anything = any(getattr(col, f) for f in _COLLECTION_IMAGE_FIELDS) or col.description is not None
+            old = old_by_name.get(col.name, {})
+            changed = any(getattr(col, f) != old.get(f) for f in synced_fields)
+            if has_anything and (col.name in rules_changed or changed):
                 background_tasks.add_task(_sync_collection_artwork_bg, col)
                 plex_tasks_queued = True
 
@@ -1215,13 +1218,16 @@ def _fetch_plex_collection_thumbs() -> dict[str, str]:
 
 
 def _sync_collection_artwork(col: CollectionModel) -> dict:
-    """Ensure `col` exists in Plex and upload its artwork. Synchronous — call via asyncio.to_thread."""
+    """Ensure `col` exists in Plex and push its artwork and description (as Summary).
+
+    Synchronous — call via asyncio.to_thread.
+    """
     from plexapi.exceptions import NotFound
     from plexapi.server import PlexServer
 
     images_to_upload = [(f, _COLLECTION_IMAGE_UPLOAD_METHODS[f]) for f in _COLLECTION_IMAGE_FIELDS if getattr(col, f)]
-    if not images_to_upload:
-        return {"ok": False, "created": False, "error": "no image set"}
+    if not images_to_upload and col.description is None:
+        return {"ok": False, "created": False, "error": "no image or description set"}
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
     except _PLEX_ERRS as e:
@@ -1278,6 +1284,12 @@ def _sync_collection_artwork(col: CollectionModel) -> dict:
             except _PLEX_ERRS as e:
                 logger.error("_sync_collection_artwork: %s failed for '%s': %s", method, col.name, e)
                 errors[field] = f"{method} failed: {e}"
+        if col.description is not None:
+            try:
+                plex_col.editSummary(col.description)
+            except _PLEX_ERRS as e:
+                logger.error("_sync_collection_artwork: editSummary failed for '%s': %s", col.name, e)
+                errors["description"] = f"editSummary failed: {e}"
 
         if not errors:
             logger.info("_sync_collection_artwork: '%s' — ok (created=%s)", col.name, created)
@@ -1403,6 +1415,8 @@ def _format_sync_error(col: "CollectionModel", error) -> str:
     if not isinstance(error, dict):
         return str(error) if error is not None else "unknown error"
     all_fields = [f for f in _COLLECTION_IMAGE_FIELDS if getattr(col, f)]
+    if col.description is not None:
+        all_fields.append("description")
     succeeded = [f for f in all_fields if f not in error]
     detail = "; ".join(f"{f}: {msg}" for f, msg in error.items())
     if succeeded:

@@ -2529,6 +2529,103 @@ async def test_put_collections_rule_change_with_no_image_skips_artwork_sync(patc
     mock_artwork.assert_not_awaited()
 
 
+# ── Collection description → Plex Summary ─────────────────────────────────────
+
+
+async def test_put_collections_description_only_change_triggers_sync(patched_app, monkeypatch):
+    """Editing only the description (no images, rules unchanged) queues a sync but not a rescan."""
+    _, _, tmp_path = patched_app
+    rule = {"field": "tags", "match": "exact", "values": ["jazz"]}
+    _write_map(tmp_path, [{"name": "Jazz", "rules": [rule]}])
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_rescan = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_do_rescan_bg", mock_rescan)
+    mock_sync = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork_bg", mock_sync)
+
+    updated = [{"name": "Jazz", "rules": [rule], "description": "Live jazz sets"}]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": updated})
+
+    assert resp.status_code == 200
+    mock_rescan.assert_not_awaited()
+    mock_sync.assert_awaited_once()
+    saved = json.loads(_map_path(tmp_path).read_text(encoding="utf-8"))["collections"][0]
+    assert saved["description"] == "Live jazz sets"
+
+
+async def test_put_collections_unchanged_description_skips_sync(patched_app, monkeypatch):
+    rule = {"field": "tags", "match": "exact", "values": ["jazz"]}
+    _, _, tmp_path = patched_app
+    _write_map(tmp_path, [{"name": "Jazz", "rules": [rule], "description": "Live jazz sets"}])
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+    mock_sync = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_sync_collection_artwork_bg", mock_sync)
+
+    updated = [{"name": "Jazz", "rules": [rule], "description": "Live jazz sets"}]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": updated})
+
+    assert resp.status_code == 200
+    mock_sync.assert_not_awaited()
+
+
+def test_sync_collection_artwork_description_only_sets_summary(monkeypatch):
+    col = yamp_app.CollectionModel(name="Test", rules=[], description="About this collection")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is True
+    mock_plex_col.editSummary.assert_called_once_with("About this collection")
+    mock_plex_col.uploadPoster.assert_not_called()
+
+
+def test_sync_collection_artwork_empty_description_clears_summary(monkeypatch):
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="https://example.com/p.jpg", description="")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        yamp_app._sync_collection_artwork(col)
+
+    mock_plex_col.editSummary.assert_called_once_with("")
+
+
+def test_sync_collection_artwork_no_description_leaves_summary_alone(monkeypatch):
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="https://example.com/p.jpg")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        yamp_app._sync_collection_artwork(col)
+
+    mock_plex_col.editSummary.assert_not_called()
+
+
+def test_sync_collection_artwork_edit_summary_failure_reported(monkeypatch):
+    col = yamp_app.CollectionModel(name="Test", rules=[], image="https://example.com/p.jpg", description="x")
+    monkeypatch.setattr(yamp_app, "PLEX_URL", "http://plex.invalid")
+    monkeypatch.setattr(yamp_app, "PLEX_TOKEN", "tok")
+
+    mock_server, _, mock_plex_col = _make_artwork_sync_mocks()
+    mock_plex_col.editSummary.side_effect = requests.exceptions.ConnectionError("boom")
+    with patch("plexapi.server.PlexServer", return_value=mock_server):
+        result = yamp_app._sync_collection_artwork(col)
+
+    assert result["ok"] is False
+    assert "description" in result["error"]
+    assert "image" not in result["error"]
+    assert "succeeded: ['image']" in yamp_app._format_sync_error(col, result["error"])
+
+
 # ── _prefetch_channel_art_bg — dedup guard ────────────────────────────────────
 
 

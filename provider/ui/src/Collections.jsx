@@ -5,11 +5,32 @@ import "react-image-crop/dist/ReactCrop.css";
 const FIELDS = ["tags", "title", "channel", "uploader", "categories", "description", "extractor"];
 const MATCHES = ["exact", "in"];
 
+// `where`: where Plex shows this image. Varies by client and Plex version — see CLAUDE.md.
 const IMAGE_TYPES = [
-  { key: "image", label: "Poster", hint: "2:3 portrait (e.g. 680×1000)" },
-  { key: "art", label: "Background", hint: "16:9 landscape (e.g. 1920×1080)" },
-  { key: "logo", label: "Logo", hint: "PNG with transparency recommended" },
-  { key: "square_art", label: "Square Art", hint: "1:1 square" },
+  {
+    key: "image",
+    label: "Poster",
+    hint: "2:3 portrait (e.g. 680×1000)",
+    where: "The collection's tile in library grids and lists, and the artwork on its page.",
+  },
+  {
+    key: "art",
+    label: "Background",
+    hint: "16:9 landscape (e.g. 1920×1080)",
+    where: "The faded backdrop behind the collection's page.",
+  },
+  {
+    key: "logo",
+    label: "Logo",
+    hint: "PNG with transparency recommended",
+    where: "A title graphic some clients draw over the background instead of plain text.",
+  },
+  {
+    key: "square_art",
+    label: "Square Art",
+    hint: "1:1 square",
+    where: "Used by client layouts that show square tiles. Not every app uses it.",
+  },
 ];
 
 // Maps image type keys to their channel art suggestion config.
@@ -145,7 +166,7 @@ function isAbsoluteUrl(url) {
 
 /** A small thumbnail chip for one image type with a "Set" button below. */
 function ImageChip({ imageType, url, onLightbox, onSet, hasSuggestions }) {
-  const { key, label } = imageType;
+  const { key, label, where } = imageType;
   const setLabel = key in CHANNEL_ART_FIELDS && hasSuggestions ? "Set ✨" : "Set";
 
   return (
@@ -163,7 +184,7 @@ function ImageChip({ imageType, url, onLightbox, onSet, hasSuggestions }) {
       >
         {url ? <img src={url} alt={label} /> : <span className="image-chip-label">{label}</span>}
       </div>
-      <button type="button" className="btn-ghost btn-sm" onClick={onSet}>
+      <button type="button" className="btn-ghost btn-sm" onClick={onSet} title={`${label} — ${where}`}>
         {setLabel}
       </button>
     </div>
@@ -199,7 +220,7 @@ function Lightbox({ src, onClose }) {
 
 /** Modal for entering a URL for one image type. Square Art shows channel art suggestions. */
 function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
-  const { key, label, hint } = imageType;
+  const { key, label, hint, where } = imageType;
   const [draft, setDraft] = useState(currentUrl || "");
   const [options, setOptions] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -332,6 +353,7 @@ function UrlModal({ imageType, currentUrl, onSet, onClose, collectionName }) {
           <strong>Set {label}</strong>
           <span className="url-modal-hint">{hint}</span>
         </div>
+        <p className="url-modal-where">In Plex: {where}</p>
 
         {cropMode ? (
           <>
@@ -473,7 +495,7 @@ function CollectionCard({
   const [urlModalKey, setUrlModalKey] = useState(null);
   const [channelArtOptions, setChannelArtOptions] = useState([]);
   const [saving, setSaving] = useState(false);
-  const [imagesUnsaved, setImagesUnsaved] = useState(false);
+  const [unsaved, setUnsaved] = useState(false);
 
   const hasMatchedVideos = videos.some((v) => v.collections.includes(collection.name));
 
@@ -541,13 +563,13 @@ function CollectionCard({
 
   const setImageUrl = (key, url) => {
     onChange({ ...collection, [key]: url });
-    setImagesUnsaved(true);
+    setUnsaved(true);
   };
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      if (await onSave(collection)) setImagesUnsaved(false);
+      if (await onSave(collection)) setUnsaved(false);
     } finally {
       setSaving(false);
     }
@@ -631,6 +653,21 @@ function CollectionCard({
               {nameError && <span className="field-error">{nameError}</span>}
             </div>
 
+            <div className="form-group">
+              <label>
+                Description
+                <textarea
+                  rows={3}
+                  value={collection.description ?? ""}
+                  onChange={(e) => {
+                    onChange({ ...collection, description: e.target.value });
+                    setUnsaved(true);
+                  }}
+                  placeholder="Shown as the collection's summary in Plex"
+                />
+              </label>
+            </div>
+
             {/* Image type chips */}
             <div className="image-chips-row">
               {IMAGE_TYPES.map((imageType) => (
@@ -647,9 +684,9 @@ function CollectionCard({
                 />
               ))}
             </div>
-            {imagesUnsaved && (
+            {unsaved && (
               <p className="unsaved-note" role="status">
-                Image changed — click <strong>Save</strong> to keep it.
+                Unsaved changes — click <strong>Save</strong> to keep them.
               </p>
             )}
           </div>

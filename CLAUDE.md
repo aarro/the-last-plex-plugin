@@ -105,12 +105,16 @@ Lives at `YOUTUBE_DATA_PATH/_collection_map.json`. Schema:
 
 Each collection supports four optional image URL fields, matching the four artwork slots Plex exposes for collections:
 
-| Field | Plex method | Aspect ratio | Recommended size |
-|---|---|---|---|
-| `image` | `uploadPoster` | 2:3 portrait | 680×1000 px |
-| `art` | `uploadArt` | 16:9 landscape | 1920×1080 px |
-| `logo` | `uploadLogo` | varies | PNG with transparency |
-| `square_art` | `uploadSquareArt` | 1:1 square | not formally documented |
+| Field | Plex method | Aspect ratio | Recommended size | Where it shows in Plex |
+|---|---|---|---|---|
+| `image` | `uploadPoster` | 2:3 portrait | 680×1000 px | Collection tile in library grids/lists; artwork on the collection page |
+| `art` | `uploadArt` | 16:9 landscape | 1920×1080 px | Faded backdrop behind the collection page |
+| `logo` | `uploadLogo` | varies | PNG with transparency | Title graphic some clients draw over the background instead of plain text |
+| `square_art` | `uploadSquareArt` | 1:1 square | not formally documented | Client layouts that use square tiles; not every app uses it |
+
+The "where it shows" column varies by Plex client and version. The UI repeats it in each image's Set dialog (`IMAGE_TYPES[].where` in `Collections.jsx`); keep the two in sync.
+
+A collection may also have a `description` (free text). It is pushed to the Plex collection's **Summary** via `editSummary` during the same sync as artwork. `null`/absent means "never set — leave Plex's summary alone"; `""` means "clear it".
 
 Note: YouTube thumbnails (`thumbnail` field in info.json) are 16:9 at up to 1920×1080, making them a perfect source for `art` (Background). Nothing in yt-dlp output is suitable for `logo` or `square_art`.
 
@@ -126,11 +130,11 @@ The artwork sync itself:
 1. Connects to Plex via `plexapi` (`PLEX_URL` + `PLEX_TOKEN`)
 2. Finds the YAMP-managed library section (agent == `tv.plex.agents.custom.yamp`)
 3. Finds the existing Plex collection by name, or creates it by matching YAMP-tracked videos against the collection rules
-4. Calls the appropriate plexapi upload method for each image field that is set
+4. Calls the appropriate plexapi upload method for each image field that is set, and `editSummary` if `description` is set
 
 If the collection isn't found in Plex on the first attempt (e.g. rescan hasn't completed yet), `_sync_collection_artwork_bg` retries once after `_ARTWORK_RETRY_DELAY` seconds (default: 30). Sync failures are logged server-side.
 
-Artwork is only synced for collections where rules or the image URL actually changed (not all collections with images on every save).
+Artwork is only synced for collections where rules, an image URL, or the description actually changed (not all collections with images on every save). Asset URLs carry a `?v=<content hash>` so replacing an image (same `<slug>_<field>` filename) still counts as a change.
 
 The 📷 button in the UI is only shown when a collection has matched videos — this ensures the create-collection path always has items to work with.
 

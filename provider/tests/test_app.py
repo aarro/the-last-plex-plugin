@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 import requests
+from fastapi import HTTPException
 from httpx import ASGITransport
 
 import app as yamp_app
@@ -27,6 +28,28 @@ def _map_path(tmp_path: Path) -> Path:
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+_real_localize_collection_images = yamp_app._localize_collection_images
+
+
+@pytest.fixture(autouse=True)
+def no_image_caching(monkeypatch):
+    """PUT /api/collections caches remote images; keep unrelated tests off the network.
+
+    Tests of the caching itself restore the real function via `real_image_caching`.
+    """
+
+    async def _noop(cols, request):
+        return []
+
+    monkeypatch.setattr(yamp_app, "_localize_collection_images", _noop)
+
+
+@pytest.fixture
+def real_image_caching(tmp_path, monkeypatch):
+    monkeypatch.setattr(yamp_app, "_localize_collection_images", _real_localize_collection_images)
+    monkeypatch.setattr(yamp_app, "_ASSETS_DIR", str(tmp_path / "assets"))
 
 
 @pytest.fixture
@@ -3245,3 +3268,70 @@ def test_save_map_replace_fails_cleanup_also_fails(tmp_path, caplog):
         save_map(map_path, data)
 
     assert any("failed to clean up" in r.message for r in caplog.records)
+
+
+# ── PUT /api/collections — local image caching ────────────────────────────────
+
+
+def _write_map(tmp_path, collections):
+    _map_path(tmp_path).write_text(
+        json.dumps({"collections": collections, "matched_ids": [], "unmatched_ids": [], "unmatched_tags": {}}),
+        encoding="utf-8",
+    )
+
+
+async def test_put_collections_caches_remote_images_locally(patched_app, real_image_caching, monkeypatch):
+    _, _, tmp_path = patched_app
+    _write_map(tmp_path, [])
+    monkeypatch.setattr(yamp_app, "YAMP_URL", "")
+
+    async def _fake_download(url):
+        return b"\x89PNG-bytes"
+
+    monkeypatch.setattr(yamp_app, "_download_image", _fake_download)
+
+    cols = [{"name": "Standup Comedy", "rules": [], "image": "https://example.com/a.png", "art": None}]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": cols})
+
+    assert resp.status_code == 200
+    assert "image_cache_failures" not in resp.json()
+    saved = json.loads(_map_path(tmp_path).read_text(encoding="utf-8"))["collections"][0]
+    assert saved["image"] == "http://test/api/assets/standup_comedy_image.png"
+    assert saved["art"] is None
+    assert (tmp_path / "assets" / "standup_comedy_image.png").read_bytes() == b"\x89PNG-bytes"
+
+
+async def test_put_collections_keeps_url_and_reports_when_download_fails(patched_app, real_image_caching, monkeypatch):
+    _, _, tmp_path = patched_app
+    _write_map(tmp_path, [])
+
+    async def _fail(url):
+        raise HTTPException(status_code=502, detail="Could not fetch image")
+
+    monkeypatch.setattr(yamp_app, "_download_image", _fail)
+
+    cols = [{"name": "Dead", "rules": [], "image": "https://dead.example/x.jpg"}]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": cols})
+
+    assert resp.status_code == 200
+    assert resp.json()["image_cache_failures"] == [
+        {"collection": "Dead", "field": "image", "error": "Could not fetch image"}
+    ]
+    saved = json.loads(_map_path(tmp_path).read_text(encoding="utf-8"))["collections"][0]
+    assert saved["image"] == "https://dead.example/x.jpg"
+
+
+async def test_put_collections_does_not_redownload_local_assets(patched_app, real_image_caching, monkeypatch):
+    _, _, tmp_path = patched_app
+    _write_map(tmp_path, [])
+    download = AsyncMock()
+    monkeypatch.setattr(yamp_app, "_download_image", download)
+
+    cols = [{"name": "Local", "rules": [], "image": "http://192.168.68.4:8765/api/assets/local_image.jpg"}]
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.put("/api/collections", json={"collections": cols})
+
+    assert resp.status_code == 200
+    download.assert_not_called()

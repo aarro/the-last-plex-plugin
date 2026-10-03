@@ -50,7 +50,8 @@ body {
 .col-right {
   min-width: 0;
   overflow-y: auto;
-  padding-bottom: 80px;
+  /* Side/top padding keeps focus outlines (2px) from being clipped by the scroll container */
+  padding: 4px 4px 80px;
 }
 
 header {
@@ -359,6 +360,78 @@ select option {
 }
 .action-bar .status.err {
   color: var(--danger);
+}
+
+/* Hover tooltips (action bar) — instant, unlike native title tooltips */
+.has-tip {
+  position: relative;
+}
+.has-tip[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  width: 260px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s;
+  z-index: 1100;
+}
+.has-tip[data-tip]:hover::after,
+.has-tip[data-tip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* Card save overlay */
+.card {
+  position: relative;
+}
+.card-saving-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(40, 42, 54, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  z-index: 5;
+}
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--muted);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.unsaved-note {
+  font-size: 12px;
+  color: var(--accent);
+  margin-top: 8px;
+}
+.unsaved-note strong {
+  color: var(--text);
 }
 
 /* Video elements */

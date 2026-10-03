@@ -116,6 +116,7 @@ Note: YouTube thumbnails (`thumbnail` field in info.json) are 16:9 at up to 1920
 
 On `PUT /api/collections`, YAMP:
 
+0. Caches every remote `http(s)` image URL locally: downloads it to `.yamp/assets/` and rewrites the field to `/api/assets/<slug>_<field>.<ext>` (`_localize_collection_images`). Hotlinks rot; the local copy is also what Plex fetches. URLs that fail to download are kept as-is and reported in the response as `image_cache_failures` (the UI shows them). Because the PUT carries the full collection list, any save backfills all remaining remote images.
 1. Saves the new collection list to disk immediately
 2. Runs collection matching (skipped entirely if only image/name changed — rules must differ)
 3. When rules changed: schedules a **Plex rescan first**, then **artwork sync** as background tasks (non-blocking). Image-only saves skip the rescan — no new collections to discover.

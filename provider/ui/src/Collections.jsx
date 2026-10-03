@@ -86,6 +86,23 @@ function RuleForm({ rule, onChange, onRemove }) {
 
 const THUMB_PAGE = 4;
 
+// Cycled in the card overlay while a save (rule matching + Plex sync) is in flight.
+const SAVING_PHRASES = ["Saving…", "Checking rules…", "Matching videos…", "Rebuilding collection…"];
+
+function SavingOverlay() {
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setI((n) => Math.min(n + 1, SAVING_PHRASES.length - 1)), 1200);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="card-saving-overlay" role="status" aria-live="polite">
+      <span className="spinner" />
+      <span>{SAVING_PHRASES[i]}</span>
+    </div>
+  );
+}
+
 function ThumbGrid({ videos, onVideoSearch }) {
   const [expanded, setExpanded] = useState(false);
   if (videos.length === 0) {
@@ -455,6 +472,8 @@ function CollectionCard({
   const [lightboxSrc, setLightboxSrc] = useState(null);
   const [urlModalKey, setUrlModalKey] = useState(null);
   const [channelArtOptions, setChannelArtOptions] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [imagesUnsaved, setImagesUnsaved] = useState(false);
 
   const hasMatchedVideos = videos.some((v) => v.collections.includes(collection.name));
 
@@ -522,6 +541,16 @@ function CollectionCard({
 
   const setImageUrl = (key, url) => {
     onChange({ ...collection, [key]: url });
+    setImagesUnsaved(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      if (await onSave(collection)) setImagesUnsaved(false);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const activeImageType = IMAGE_TYPES.find((t) => t.key === urlModalKey);
@@ -618,6 +647,11 @@ function CollectionCard({
                 />
               ))}
             </div>
+            {imagesUnsaved && (
+              <p className="unsaved-note" role="status">
+                Image changed — click <strong>Save</strong> to keep it.
+              </p>
+            )}
           </div>
 
           {/* Full-width row 3: rules + video thumbs + footer */}
@@ -658,14 +692,16 @@ function CollectionCard({
                 </button>
               )}
               {onSave && (
-                <button type="button" className="btn-primary btn-sm" onClick={() => onSave(collection)}>
-                  Save
+                <button type="button" className="btn-primary btn-sm" onClick={handleSave} disabled={saving}>
+                  {saving ? "Saving…" : "Save"}
                 </button>
               )}
             </div>
           </div>
         </>
       )}
+
+      {saving && <SavingOverlay />}
 
       {/* Lightbox */}
       {lightboxSrc && <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}

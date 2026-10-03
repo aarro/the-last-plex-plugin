@@ -896,7 +896,7 @@ async def api_get_collections():
 
 
 @app.put("/api/collections", dependencies=[Depends(_require_api_key)])
-async def api_put_collections(body: CollectionsBody, background_tasks: BackgroundTasks):
+async def api_put_collections(body: CollectionsBody, background_tasks: BackgroundTasks, request: Request):
     mapping_path = _collection_map_path()
     if not mapping_path:
         raise HTTPException(status_code=404, detail="Collection map not found")
@@ -911,6 +911,11 @@ async def api_put_collections(body: CollectionsBody, background_tasks: Backgroun
 
     old_cols = data.get("collections", [])
     new_cols = [c.model_dump() for c in body.collections]
+    image_failures = await _localize_collection_images(new_cols, request)
+    # Keep the models in step with the rewritten URLs so Plex artwork sync uploads the cached copy.
+    for model, col in zip(body.collections, new_cols, strict=True):
+        for f in _COLLECTION_IMAGE_FIELDS:
+            setattr(model, f, col.get(f))
     rules_changed, has_rule_changes = diff_collections(old_cols, new_cols)
 
     data["collections"] = new_cols
@@ -966,7 +971,10 @@ async def api_put_collections(body: CollectionsBody, background_tasks: Backgroun
         task = asyncio.ensure_future(_prefetch_channel_art_bg(list(rules_changed)))
         task.add_done_callback(lambda f: _log_task_exception(f, "channel art prefetch after collection save"))
 
-    return {"ok": True, **stats, "plex_sync": plex_tasks_queued}
+    result = {"ok": True, **stats, "plex_sync": plex_tasks_queued}
+    if image_failures:
+        result["image_cache_failures"] = image_failures
+    return result
 
 
 @app.get("/api/channel-art")
@@ -1611,16 +1619,52 @@ async def api_assets_save(body: AssetSaveBody, request: Request):
     """Download a URL and save it as a hard file in .yamp/assets/."""
     os.makedirs(_ASSETS_DIR, exist_ok=True)
     data = await _download_image(body.source_url)
+    filename = _store_asset(body.collection, body.type, data)
+    base = YAMP_URL or str(request.base_url).rstrip("/")
+    return {"url": f"{base}/api/assets/{filename}"}
+
+
+def _store_asset(collection: str, asset_type: str, data: bytes) -> str:
+    """Write image bytes to .yamp/assets/ and return the filename. Raises HTTPException on write failure."""
     ext = "png" if data[:4] == b"\x89PNG" else "jpg"
-    filename = f"{_slugify(body.collection)}_{body.type}.{ext}"
+    filename = f"{_slugify(collection)}_{asset_type}.{ext}"
     dest = os.path.join(_ASSETS_DIR, filename)
     try:
         Path(dest).write_bytes(data)
     except OSError as e:
-        logger.error("api_assets_save: could not write '%s': %s", dest, e)
+        logger.error("_store_asset: could not write '%s': %s", dest, e)
         raise HTTPException(status_code=500, detail="Could not save image") from e
+    return filename
+
+
+async def _localize_collection_images(cols: list[dict], request: Request) -> list[dict]:
+    """Replace remote image URLs in `cols` (in place) with locally cached copies under .yamp/assets/.
+
+    Remote hotlinks rot; a local copy survives and is what Plex fetches. A URL that fails to
+    download is left unchanged, and reported in the returned list of {collection, field, error}.
+    """
     base = YAMP_URL or str(request.base_url).rstrip("/")
-    return {"url": f"{base}/api/assets/{filename}"}
+
+    async def _localize(col: dict, field: str) -> dict | None:
+        url = col[field]
+        try:
+            data = await _download_image(url)
+            col[field] = f"{base}/api/assets/{_store_asset(col['name'], field, data)}"
+        except HTTPException as e:
+            logger.warning("_localize_collection_images: kept remote %s for '%s': %s", field, col["name"], e.detail)
+            return {"collection": col["name"], "field": field, "error": e.detail}
+        return None
+
+    jobs = [
+        _localize(col, f)
+        for col in cols
+        for f in _COLLECTION_IMAGE_FIELDS
+        if (col.get(f) or "").startswith(("http://", "https://")) and "/api/assets/" not in col[f]
+    ]
+    if not jobs:
+        return []
+    os.makedirs(_ASSETS_DIR, exist_ok=True)
+    return [r for r in await asyncio.gather(*jobs) if r]
 
 
 @app.post("/api/assets/crop", dependencies=[Depends(_require_api_key)])

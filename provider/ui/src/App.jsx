@@ -60,7 +60,16 @@ export default function App() {
         body: JSON.stringify({ collections }),
       });
       const plexNote = result.plex_sync ? " Plex syncing in background." : "";
-      setStatus({ type: "ok", msg: `${makeMsg(result)}${plexNote}` });
+      const failures = result.image_cache_failures ?? [];
+      if (failures.length > 0) {
+        const list = failures.map((f) => `${f.collection} (${f.field}): ${f.error}`).join("; ");
+        setStatus({
+          type: "err",
+          msg: `${makeMsg(result)} But ${failures.length} image(s) couldn't be cached locally and still hotlink: ${list}`,
+        });
+      } else {
+        setStatus({ type: "ok", msg: `${makeMsg(result)}${plexNote}` });
+      }
       try {
         await load();
       } catch (e) {
@@ -197,24 +206,30 @@ export default function App() {
       <div className="action-bar">
         {version && <span className="action-bar-version">{version}</span>}
         {status && <span className={`status ${status.type}`}>{status.msg}</span>}
-        <button type="button" className="btn-ghost" onClick={fixThumbnails} disabled={fixingThumbs}>
+        <button
+          type="button"
+          className="btn-ghost has-tip"
+          onClick={fixThumbnails}
+          disabled={fixingThumbs}
+          data-tip="Re-upload every video's thumbnail to Plex, overwriting its poster. Videos YAMP has no image for are skipped."
+        >
           {fixingThumbs ? "Fixing…" : "Fix Thumbnails"}
         </button>
         <button
           type="button"
-          className="btn-ghost"
+          className="btn-ghost has-tip"
           onClick={rebuildIndex}
           disabled={rebuildingIndex}
-          title="Re-walk the data directory and rebuild YAMP's in-memory video index"
+          data-tip="Re-scan the downloads folder and rebuild YAMP's video index. Use after adding or removing videos."
         >
           {rebuildingIndex ? "Rebuilding…" : "Rebuild Index"}
         </button>
         <button
           type="button"
-          className="btn-ghost"
+          className="btn-ghost has-tip"
           onClick={rescan}
           disabled={rescanning}
-          title="Ask Plex to re-fetch metadata for all videos in YAMP-managed libraries"
+          data-tip="Ask Plex to re-fetch metadata for all videos in YAMP-managed libraries."
         >
           {rescanning ? "Scanning…" : "Trigger Plex Scan"}
         </button>

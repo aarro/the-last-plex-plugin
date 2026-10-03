@@ -4,6 +4,7 @@ A Plex Custom Metadata Provider for yt-dlp downloads.
 """
 
 import asyncio
+import hashlib
 import io
 import ipaddress
 import json
@@ -1621,7 +1622,22 @@ async def api_assets_save(body: AssetSaveBody, request: Request):
     data = await _download_image(body.source_url)
     filename = _store_asset(body.collection, body.type, data)
     base = YAMP_URL or str(request.base_url).rstrip("/")
-    return {"url": f"{base}/api/assets/{filename}"}
+    return {"url": _asset_url(base, filename)}
+
+
+def _asset_url(base: str, filename: str) -> str:
+    """Public URL for a stored asset, versioned by content hash.
+
+    Filenames are deterministic (<collection>_<field>.<ext>), so replacing an image would
+    otherwise yield an identical URL: browsers would show the cached old image, and the
+    "image changed" check on save would skip the Plex artwork sync. The ?v= hash makes a
+    new image a new URL; the asset route ignores the query string.
+    """
+    try:
+        version = hashlib.sha1(Path(_ASSETS_DIR, filename).read_bytes(), usedforsecurity=False).hexdigest()[:8]
+    except OSError:
+        return f"{base}/api/assets/{filename}"
+    return f"{base}/api/assets/{filename}?v={version}"
 
 
 def _store_asset(collection: str, asset_type: str, data: bytes) -> str:
@@ -1649,7 +1665,7 @@ async def _localize_collection_images(cols: list[dict], request: Request) -> lis
         url = col[field]
         try:
             data = await _download_image(url)
-            col[field] = f"{base}/api/assets/{_store_asset(col['name'], field, data)}"
+            col[field] = _asset_url(base, _store_asset(col["name"], field, data))
         except HTTPException as e:
             logger.warning("_localize_collection_images: kept remote %s for '%s': %s", field, col["name"], e.detail)
             return {"collection": col["name"], "field": field, "error": e.detail}
@@ -1698,7 +1714,7 @@ async def api_assets_crop(body: AssetCropBody, request: Request):
         logger.error("api_assets_crop: unexpected error processing '%s': %s", body.source_url, e)
         raise HTTPException(status_code=500, detail="Could not process image") from e
     base = YAMP_URL or str(request.base_url).rstrip("/")
-    return {"url": f"{base}/api/assets/{filename}"}
+    return {"url": _asset_url(base, filename)}
 
 
 @app.get("/api/assets/{filename}")

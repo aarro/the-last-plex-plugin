@@ -6,6 +6,7 @@ triggering the lifespan (which requires a real DATA_PATH directory).
 """
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2894,6 +2895,29 @@ async def test_api_assets_save_happy_path(assets_dir):
     assert (assets_dir / "my_band_image.jpg").read_bytes() == fake_bytes
 
 
+async def test_api_assets_save_replacing_image_changes_url(assets_dir):
+    """Same collection+type reuses the filename, so the URL must differ by content or caches/sync miss the change."""
+    urls = []
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for payload in (b"\xff\xd8\xff" + b"\x01" * 50, b"\xff\xd8\xff" + b"\x02" * 50):
+            mock_client = _make_plex_mock(return_value=_make_image_response(content=payload))
+            with patch("app.httpx.AsyncClient", return_value=mock_client):
+                resp = await client.post(
+                    "/api/assets/save",
+                    json={"source_url": "https://example.com/img.jpg", "collection": "My Band", "type": "image"},
+                )
+            urls.append(resp.json()["url"])
+    assert urls[0] != urls[1]
+    assert urls[0].split("?")[0] == urls[1].split("?")[0]
+
+
+async def test_api_assets_serves_versioned_url(assets_dir):
+    (assets_dir / "foo_image.jpg").write_bytes(b"\xff\xd8\xff")
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/assets/foo_image.jpg?v=abcd1234")
+    assert resp.status_code == 200
+
+
 async def test_api_assets_save_invalid_type(assets_dir):
     async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -3297,7 +3321,7 @@ async def test_put_collections_caches_remote_images_locally(patched_app, real_im
     assert resp.status_code == 200
     assert "image_cache_failures" not in resp.json()
     saved = json.loads(_map_path(tmp_path).read_text(encoding="utf-8"))["collections"][0]
-    assert saved["image"] == "http://test/api/assets/standup_comedy_image.png"
+    assert re.fullmatch(r"http://test/api/assets/standup_comedy_image\.png\?v=[0-9a-f]{8}", saved["image"])
     assert saved["art"] is None
     assert (tmp_path / "assets" / "standup_comedy_image.png").read_bytes() == b"\x89PNG-bytes"
 

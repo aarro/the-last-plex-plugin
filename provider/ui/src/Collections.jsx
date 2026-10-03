@@ -820,7 +820,7 @@ export default function Collections({ collections, videos, onChange, onVideoSear
               ? (updatedCollection) => {
                   const next = [...collections];
                   next[i] = updatedCollection;
-                  return onSave(next);
+                  return onSave(next, updatedCollection.name);
                 }
               : undefined
           }

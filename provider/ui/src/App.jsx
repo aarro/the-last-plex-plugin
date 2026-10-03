@@ -51,7 +51,9 @@ export default function App() {
     setData((d) => ({ ...d, collections }));
   };
 
-  const saveWithCollections = async (collections, makeMsg) => {
+  // savedName: the collection being saved. Image-cache failures for other collections are
+  // logged to the console instead of nagging on every save.
+  const saveWithCollections = async (collections, makeMsg, savedName) => {
     setStatus(null);
     try {
       const result = await fetchJson("/api/collections", {
@@ -60,7 +62,11 @@ export default function App() {
         body: JSON.stringify({ collections }),
       });
       const plexNote = result.plex_sync ? " Plex syncing in background." : "";
-      const failures = result.image_cache_failures ?? [];
+      const allFailures = result.image_cache_failures ?? [];
+      const failures = savedName ? allFailures.filter((f) => f.collection === savedName) : allFailures;
+      for (const f of allFailures) {
+        if (!failures.includes(f)) console.warn(`Image not cached: ${f.collection} (${f.field}): ${f.error}`);
+      }
       if (failures.length > 0) {
         const list = failures.map((f) => `${f.collection} (${f.field}): ${f.error}`).join("; ");
         setStatus({
@@ -193,8 +199,12 @@ export default function App() {
             videos={videos}
             onChange={setCollections}
             onVideoSearch={setSearch}
-            onSave={(updatedCollections) =>
-              saveWithCollections(updatedCollections, (r) => `Saved — ${r.matched} matched, ${r.unmatched} unmatched`)
+            onSave={(updatedCollections, savedName) =>
+              saveWithCollections(
+                updatedCollections,
+                (r) => `Saved — ${r.matched} matched, ${r.unmatched} unmatched`,
+                savedName
+              )
             }
           />
         </div>
